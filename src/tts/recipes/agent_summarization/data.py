@@ -1,28 +1,44 @@
 """
 Agent trajectory data format and conversion utilities.
 
-Trajectories follow a schema inspired by Agent Data Protocol (ADP):
-each trajectory has a task description, an ordered list of steps (assistant
-thoughts/tool calls and tool observations), and a target summary.
+Each record represents a PARTIAL coding-agent trajectory — a prefix of actions
+and observations captured at some point mid-task — paired with a teacher-generated
+summary of what the agent has done so far.
 
-JSONL on disk: one JSON object per line, schema:
+The intended data pipeline:
+  1. Run a coding agent (e.g. on mini-SWE tasks) and record the full trajectory.
+  2. Sample cutpoints along each trajectory.
+  3. For each (trajectory[:cutpoint], task) pair, call a teacher model to generate
+     a "progress so far" summary.
+  4. Write (partial_steps, summary) to JSONL using the schema below.
+
+This recipe then trains a student model to reproduce those summaries given only
+the partial trajectory — enabling context compression for long-horizon agents.
+
+JSONL schema (one JSON object per line):
   {
-    "trajectory_id": "<str>",          # optional unique id
-    "task": "<str>",                   # what the agent was asked to do
-    "steps": [
+    "trajectory_id": "<str>",       # optional; useful for grouping cutpoints
+    "task": "<str>",                # the original task / problem statement
+    "steps": [                      # partial trajectory up to the sample cutpoint
       {
         "role": "assistant" | "tool" | "user",
-        "content": "<str>",            # text content / observation
-        "tool_calls": [                # optional, for assistant role
+        "content": "<str>",
+        "tool_calls": [             # optional; present when role == "assistant"
           {"name": "<str>", "arguments": {<dict>}, "id": "<str>"}
         ],
-        "tool_call_id": "<str>",       # optional, links tool result to call
-        "name": "<str>"                # tool name, for role=tool
-      }
+        "tool_call_id": "<str>",    # links a tool result back to its call
+        "name": "<str>"             # tool name; present when role == "tool"
+      },
+      ...
     ],
-    "summary": "<str>",               # target: what the model should learn to produce
-    "metadata": {<dict>}               # optional, ignored during training
+    "summary": "<str>",            # teacher-generated summary of steps so far
+    "metadata": {<dict>}            # optional; e.g. source repo, cutpoint index
   }
+
+Mini-SWE loader:
+  Use from_swe_agent_dict() to convert SWE-agent trajectory records (which use
+  a flat "history" list of role/content dicts) into AgentTrajectory objects.
+  The "task" field is taken from the problem_statement.
 """
 
 from __future__ import annotations
@@ -33,12 +49,13 @@ from pathlib import Path
 from typing import Any
 
 SYSTEM_PROMPT = (
-    "You are an expert at summarizing coding agent trajectories. "
-    "Given a task description and the full sequence of agent actions and "
-    "tool observations, produce a concise, accurate summary of what the agent "
-    "did and what the outcome was. Focus on decisions, key findings, and the "
-    "final result. Be specific about files changed, errors encountered, and "
-    "solutions applied."
+    "You are an expert at tracking and summarizing the progress of coding agents. "
+    "You will be shown a task description followed by a partial sequence of agent "
+    "actions and tool observations — the agent has not yet finished. "
+    "Produce a concise summary of what the agent has done so far: "
+    "which files it has read or modified, what it has discovered, "
+    "what approaches it has tried, and what state it has left things in. "
+    "Do not speculate about what it will do next."
 )
 
 
@@ -79,8 +96,8 @@ class TrajectoryStep:
 @dataclass
 class AgentTrajectory:
     task: str
-    steps: list[TrajectoryStep]
-    summary: str
+    steps: list[TrajectoryStep]  # partial trajectory; may not be complete
+    summary: str                 # teacher-generated summary of these steps
     trajectory_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -94,9 +111,72 @@ class AgentTrajectory:
             metadata=d.get("metadata", {}),
         )
 
+    @classmethod
+    def from_swe_agent_dict(
+        cls,
+        d: dict[str, Any],
+        summary: str,
+        cutpoint: int | None = None,
+    ) -> AgentTrajectory:
+        """
+        Convert a SWE-agent trajectory record to AgentTrajectory.
+
+        SWE-agent records typically have:
+          - instance_id: str
+          - problem_statement: str
+          - history: list of {"role": str, "content": str} dicts
+            (roles are "system", "user", "assistant")
+
+        The bash tool results appear as "user" messages in SWE-agent's format;
+        we re-label them as role="tool" with name="bash" for clarity.
+
+        Args:
+            d: raw SWE-agent trajectory dict
+            summary: teacher-generated summary to attach
+            cutpoint: if given, only include history[:cutpoint]; otherwise all
+        """
+        history: list[dict[str, Any]] = d.get("history", [])
+        if cutpoint is not None:
+            history = history[:cutpoint]
+
+        steps: list[TrajectoryStep] = []
+        for msg in history:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            # Skip system prompt — it's static and doesn't belong in the trajectory
+            if role == "system":
+                continue
+            # In SWE-agent, the environment responses come back as "user" messages
+            # that follow an assistant action; re-label them as tool observations.
+            if role == "user" and steps and steps[-1].role == "assistant":
+                steps.append(TrajectoryStep(role="tool", name="bash", content=content))
+            else:
+                steps.append(TrajectoryStep(role=role, content=content))
+
+        task = d.get("problem_statement", d.get("task", ""))
+        instance_id = d.get("instance_id", d.get("trajectory_id", ""))
+
+        return cls(
+            task=task,
+            steps=steps,
+            summary=summary,
+            trajectory_id=instance_id,
+            metadata={"source": "swe_agent", "cutpoint": cutpoint},
+        )
+
+    def with_prefix(self, n_steps: int) -> AgentTrajectory:
+        """Return a new trajectory with only the first n_steps steps."""
+        return AgentTrajectory(
+            task=self.task,
+            steps=self.steps[:n_steps],
+            summary=self.summary,
+            trajectory_id=self.trajectory_id,
+            metadata=self.metadata,
+        )
+
 
 def load_trajectories(path: str | Path) -> list[AgentTrajectory]:
-    """Load trajectories from a JSONL file (one JSON object per line)."""
+    """Load AgentTrajectory records from a JSONL file."""
     trajectories = []
     with open(path) as f:
         for line in f:
@@ -115,8 +195,7 @@ def _format_step(step: TrajectoryStep, index: int) -> str:
     parts: list[str] = []
 
     if step.role == "assistant":
-        header = f"[Step {index} — assistant]"
-        parts.append(header)
+        parts.append(f"[Step {index} — assistant]")
         if step.content:
             parts.append(step.content)
         for tc in step.tool_calls:
@@ -124,23 +203,23 @@ def _format_step(step: TrajectoryStep, index: int) -> str:
 
     elif step.role == "tool":
         tool_label = step.name or "tool"
-        header = f"[Step {index} — {tool_label} result]"
-        parts.append(header)
+        parts.append(f"[Step {index} — {tool_label} result]")
         parts.append(step.content)
 
-    else:  # user or other
+    else:
         parts.append(f"[Step {index} — {step.role}]")
         parts.append(step.content)
 
     return "\n".join(parts)
 
 
-def format_trajectory_text(trajectory: AgentTrajectory) -> str:
-    """Render a trajectory as a flat text block for the user message."""
-    sections: list[str] = []
-    sections.append(f"[Task]\n{trajectory.task}")
-    sections.append("[Trajectory]")
-    for i, step in enumerate(trajectory.steps, start=1):
+def format_trajectory_text(steps: list[TrajectoryStep], task: str) -> str:
+    """Render a partial trajectory as a flat text block for the user message."""
+    sections: list[str] = [
+        f"[Task]\n{task}",
+        f"[Partial Trajectory — {len(steps)} step(s) so far]",
+    ]
+    for i, step in enumerate(steps, start=1):
         sections.append(_format_step(step, i))
     return "\n\n".join(sections)
 
@@ -150,16 +229,15 @@ def trajectory_to_conversation(
     system_prompt: str = SYSTEM_PROMPT,
 ) -> list[dict[str, Any]]:
     """
-    Convert an AgentTrajectory to a list[Message] suitable for
-    tinker_cookbook.supervised.data.conversation_to_datum.
+    Convert an AgentTrajectory to a list[Message] for tinker's conversation_to_datum.
 
-    The returned conversation has three turns:
-      system  → instructions for the summarization task
-      user    → the rendered trajectory (task + steps)
-      assistant → the target summary (the only tokens trained on)
+    Three turns:
+      system    → summarization instructions
+      user      → rendered partial trajectory (task + steps so far)
+      assistant → the target summary (only these tokens receive loss weight)
     """
     return [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": format_trajectory_text(trajectory)},
+        {"role": "user", "content": format_trajectory_text(trajectory.steps, trajectory.task)},
         {"role": "assistant", "content": trajectory.summary},
     ]
