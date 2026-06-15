@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "tts-tokens-that-suffice"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "tinker-cookbook>=0.4.2",
+    "skyrl>=0.2.0",
+    # flash-attn must be installed separately — see below
+]
+
+[project.optional-dependencies]
+flash = [
+    # Install with:
+    #   CUDA_HOME=/usr/local/cuda-12.9 pip install flash-attn --no-build-isolation
+    # flash-attn has no prebuilt wheel for torch 2.9+cu128; it compiles from source.
+    "flash-attn>=2.7",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
