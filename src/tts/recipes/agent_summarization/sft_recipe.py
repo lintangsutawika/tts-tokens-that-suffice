@@ -16,7 +16,7 @@ size without requiring additional teacher summaries — the stored summary is
 treated as approximately valid for shorter prefixes too.
 
 Usage:
-    TINKER_API_KEY=tml-dummy uv run -m tts.recipes.agent_summarization.recipe \\
+    TINKER_API_KEY=tml-dummy uv run -m tts.recipes.agent_summarization.sft_recipe \\
         dataset_path=/path/to/partial_trajectories.jsonl
 
 Or via the test script:
