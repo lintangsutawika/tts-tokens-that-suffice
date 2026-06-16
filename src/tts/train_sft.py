@@ -16,7 +16,7 @@ size without requiring additional teacher summaries — the stored summary is
 treated as approximately valid for shorter prefixes too.
 
 Usage:
-    TINKER_API_KEY=tml-dummy uv run -m tts.recipes.agent_summarization.sft_recipe \\
+    TINKER_API_KEY=tml-dummy uv run -m tts.train_sft \\
         dataset_path=/path/to/partial_trajectories.jsonl
 
 Or via the test script:
@@ -38,7 +38,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
 
-from tts.recipes.agent_summarization.data import (
+from tts.data.agent_trajectory import (
     AgentTrajectory,
     load_trajectories,
     trajectory_to_conversation,

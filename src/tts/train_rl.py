@@ -18,7 +18,7 @@ Variable naming convention (mirrors rl_loop.py):
     _D  Datum dimension    (P × G after flattening)
 
 Usage:
-    TINKER_API_KEY=tml-dummy uv run -m tts.recipes.agent_summarization.rl_recipe \\
+    TINKER_API_KEY=tml-dummy uv run -m tts.train_rl \\
         dataset_path=/path/to/partial_trajectories.jsonl
 
 Or via the test script:
@@ -43,7 +43,7 @@ from tinker_cookbook.tokenizer_utils import get_tokenizer
 from tinker_cookbook.utils import ml_log
 from tinker_cookbook.utils.git_rev import recipe_user_metadata
 
-from tts.recipes.agent_summarization.data import (
+from tts.data.agent_trajectory import (
     AgentTrajectory,
     SYSTEM_PROMPT,
     format_trajectory_text,

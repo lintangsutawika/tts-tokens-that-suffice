@@ -16,7 +16,7 @@ Pass chz overrides to change any Config field, e.g.:
 import sys
 
 import chz
-from tts.recipes.agent_summarization.sft_recipe import Config, main
+from tts.train_sft import Config, main
 
 # Points at the bundled sample dataset in this repo
 _SAMPLE_DATA = "tests/fixtures/sample_trajectories.jsonl"
