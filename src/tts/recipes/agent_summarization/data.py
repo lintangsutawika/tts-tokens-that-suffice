@@ -1,38 +1,37 @@
 """
 Agent trajectory data format and conversion utilities.
 
-Each record represents a PARTIAL coding-agent trajectory — a prefix of actions
-and observations captured at some point mid-task — paired with a teacher-generated
-summary of what the agent has done so far.
+Each record represents a PARTIAL coding-agent trajectory split at a cutpoint:
+  - steps        — the prefix the model sees (history up to the cutpoint)
+  - continuation — the suffix after the cutpoint (what the agent did next)
+  - summary      — teacher-generated description of what steps contain
+
+Storing both halves lets future reward functions measure whether a summary is
+sufficient for the agent to continue without revisiting already-seen context.
 
 The intended data pipeline:
   1. Run a coding agent (e.g. on mini-SWE tasks) and record the full trajectory.
   2. Sample cutpoints along each trajectory.
-  3. For each (trajectory[:cutpoint], task) pair, call a teacher model to generate
-     a "progress so far" summary.
-  4. Write (partial_steps, summary) to JSONL using the schema below.
-
-This recipe then trains a student model to reproduce those summaries given only
-the partial trajectory — enabling context compression for long-horizon agents.
+  3. For each cutpoint, call a teacher model to generate a "progress so far" summary.
+  4. Write (steps, continuation, summary) to JSONL using the schema below.
 
 JSONL schema (one JSON object per line):
   {
     "trajectory_id": "<str>",       # optional; useful for grouping cutpoints
     "task": "<str>",                # the original task / problem statement
-    "steps": [                      # partial trajectory up to the sample cutpoint
-      {
-        "role": "assistant" | "tool" | "user",
-        "content": "<str>",
-        "tool_calls": [             # optional; present when role == "assistant"
-          {"name": "<str>", "arguments": {<dict>}, "id": "<str>"}
-        ],
-        "tool_call_id": "<str>",    # links a tool result back to its call
-        "name": "<str>"             # tool name; present when role == "tool"
-      },
-      ...
-    ],
-    "summary": "<str>",            # teacher-generated summary of steps so far
+    "steps": [ <step>, ... ],       # partial trajectory up to the cutpoint
+    "continuation": [ <step>, ... ],# remaining steps after the cutpoint (may be [])
+    "summary": "<str>",             # teacher-generated summary of steps so far
     "metadata": {<dict>}            # optional; e.g. source repo, cutpoint index
+  }
+
+  where each <step> is:
+  {
+    "role": "assistant" | "tool" | "user",
+    "content": "<str>",
+    "tool_calls": [{"name": "<str>", "arguments": {<dict>}, "id": "<str>"}],
+    "tool_call_id": "<str>",
+    "name": "<str>"
   }
 
 Mini-SWE loader:
@@ -96,8 +95,9 @@ class TrajectoryStep:
 @dataclass
 class AgentTrajectory:
     task: str
-    steps: list[TrajectoryStep]  # partial trajectory; may not be complete
-    summary: str                 # teacher-generated summary of these steps
+    steps: list[TrajectoryStep]          # partial trajectory up to the cutpoint
+    continuation: list[TrajectoryStep]   # remaining steps after the cutpoint
+    summary: str                         # teacher-generated summary of steps
     trajectory_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -106,6 +106,7 @@ class AgentTrajectory:
         return cls(
             task=d["task"],
             steps=[TrajectoryStep.from_dict(s) for s in d.get("steps", [])],
+            continuation=[TrajectoryStep.from_dict(s) for s in d.get("continuation", [])],
             summary=d["summary"],
             trajectory_id=d.get("trajectory_id", ""),
             metadata=d.get("metadata", {}),
@@ -129,29 +130,36 @@ class AgentTrajectory:
 
         The bash tool results appear as "user" messages in SWE-agent's format;
         we re-label them as role="tool" with name="bash" for clarity.
+        System messages are skipped (static boilerplate, not part of the trajectory).
 
         Args:
             d: raw SWE-agent trajectory dict
-            summary: teacher-generated summary to attach
-            cutpoint: if given, only include history[:cutpoint]; otherwise all
+            summary: teacher-generated summary of steps up to cutpoint
+            cutpoint: index into the raw history list; steps before it become
+                      `steps`, steps from it onwards become `continuation`.
+                      If None, all history goes into steps and continuation=[].
         """
-        history: list[dict[str, Any]] = d.get("history", [])
-        if cutpoint is not None:
-            history = history[:cutpoint]
+        raw_history: list[dict[str, Any]] = d.get("history", [])
 
-        steps: list[TrajectoryStep] = []
-        for msg in history:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-            # Skip system prompt — it's static and doesn't belong in the trajectory
-            if role == "system":
-                continue
-            # In SWE-agent, the environment responses come back as "user" messages
-            # that follow an assistant action; re-label them as tool observations.
-            if role == "user" and steps and steps[-1].role == "assistant":
-                steps.append(TrajectoryStep(role="tool", name="bash", content=content))
-            else:
-                steps.append(TrajectoryStep(role=role, content=content))
+        def _parse_messages(msgs: list[dict[str, Any]]) -> list[TrajectoryStep]:
+            result: list[TrajectoryStep] = []
+            for msg in msgs:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    continue
+                if role == "user" and result and result[-1].role == "assistant":
+                    result.append(TrajectoryStep(role="tool", name="bash", content=content))
+                else:
+                    result.append(TrajectoryStep(role=role, content=content))
+            return result
+
+        if cutpoint is not None:
+            steps = _parse_messages(raw_history[:cutpoint])
+            continuation = _parse_messages(raw_history[cutpoint:])
+        else:
+            steps = _parse_messages(raw_history)
+            continuation = []
 
         task = d.get("problem_statement", d.get("task", ""))
         instance_id = d.get("instance_id", d.get("trajectory_id", ""))
@@ -159,16 +167,18 @@ class AgentTrajectory:
         return cls(
             task=task,
             steps=steps,
+            continuation=continuation,
             summary=summary,
             trajectory_id=instance_id,
             metadata={"source": "swe_agent", "cutpoint": cutpoint},
         )
 
     def with_prefix(self, n_steps: int) -> AgentTrajectory:
-        """Return a new trajectory with only the first n_steps steps."""
+        """Return a view with only the first n_steps of steps; the rest move to continuation."""
         return AgentTrajectory(
             task=self.task,
             steps=self.steps[:n_steps],
+            continuation=self.steps[n_steps:] + self.continuation,
             summary=self.summary,
             trajectory_id=self.trajectory_id,
             metadata=self.metadata,

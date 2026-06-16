@@ -3,15 +3,13 @@ RL recipe: teach a model to summarize partial coding agent trajectories via
 GRPO-style reward centering.
 
 For each trajectory in the batch the model generates `group_size` candidate
-summaries. Each candidate is scored by a reward function; advantages are
+summaries. Each candidate is scored by the coverage reward; advantages are
 computed as reward – group_mean (reward centering). Policy gradients are
 applied via the importance-sampling loss.
 
-Reward (configurable via `reward_fn`):
-  "rouge1"   — unigram F1 against the reference summary stored in the JSONL.
-               Best default: rewards coverage and precision jointly.
-  "coverage" — fraction of tool/file names that appear in the generated
-               summary. Reference-free; useful when no teacher summaries exist.
+Coverage reward: fraction of tool names and file names that appear in the
+generated summary, extracted from both the partial trajectory (steps) and
+the continuation. Reference-free — no teacher summaries needed at training time.
 
 Variable naming convention (mirrors rl_loop.py):
     _P  Problem dimension  (different trajectories in a batch)
@@ -30,7 +28,6 @@ Or via the test script:
 from __future__ import annotations
 
 import logging
-import re
 import time
 from concurrent.futures import Future
 
@@ -71,66 +68,39 @@ class Config:
     save_every: int = 20
     ttl_seconds: int | None = 604800
     num_epochs: int = 1
-    # "rouge1" requires reference summaries in the JSONL.
-    # "coverage" is reference-free (uses tool/file names from the trajectory).
-    reward_fn: str = "rouge1"
 
 
 # ---------------------------------------------------------------------------
-# Reward functions
+# Reward
 # ---------------------------------------------------------------------------
 
-def _tokenize(text: str) -> list[str]:
-    return re.findall(r"\b\w+\b", text.lower())
-
-
-def rouge1_reward(summary: str, reference: str) -> float:
-    """Unigram F1 between generated summary and reference."""
-    if not summary.strip() or not reference.strip():
-        return 0.0
-    summary_tokens = set(_tokenize(summary))
-    ref_tokens = set(_tokenize(reference))
-    if not summary_tokens or not ref_tokens:
-        return 0.0
-    overlap = summary_tokens & ref_tokens
-    precision = len(overlap) / len(summary_tokens)
-    recall = len(overlap) / len(ref_tokens)
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
-
-
-def _extract_trajectory_entities(trajectory: AgentTrajectory) -> set[str]:
-    """Extract file paths and tool names mentioned in the trajectory steps."""
+def _extract_entities(steps: list) -> set[str]:
+    """Extract tool names and file basenames from a list of TrajectoryStep."""
     entities: set[str] = set()
-    for step in trajectory.steps:
+    for step in steps:
         if step.name:
             entities.add(step.name.lower())
         for tc in step.tool_calls:
             entities.add(tc.name.lower())
             for v in tc.arguments.values():
                 if isinstance(v, str) and ("/" in v or "." in v):
-                    # Looks like a file path — add the basename
                     entities.add(v.split("/")[-1].lower())
     return entities
 
 
 def coverage_reward(summary: str, trajectory: AgentTrajectory) -> float:
-    """Fraction of key entities (tool names, file names) mentioned in summary."""
-    entities = _extract_trajectory_entities(trajectory)
+    """
+    Fraction of key entities mentioned in the summary.
+
+    Entities are tool names and file basenames drawn from both the partial
+    trajectory (steps) and the continuation — the full entity set represents
+    everything the agent interacted with across the complete task.
+    """
+    entities = _extract_entities(trajectory.steps) | _extract_entities(trajectory.continuation)
     if not entities:
-        return 0.5  # no entities to check — neutral reward
+        return 0.5  # no named entities to check — neutral reward
     summary_lower = summary.lower()
-    mentioned = sum(1 for e in entities if e in summary_lower)
-    return mentioned / len(entities)
-
-
-def score(summary: str, trajectory: AgentTrajectory, reward_fn: str) -> float:
-    if reward_fn == "rouge1":
-        return rouge1_reward(summary, trajectory.summary)
-    if reward_fn == "coverage":
-        return coverage_reward(summary, trajectory)
-    raise ValueError(f"Unknown reward_fn: {reward_fn!r}. Choose 'rouge1' or 'coverage'.")
+    return sum(1 for e in entities if e in summary_lower) / len(entities)
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +246,7 @@ def main(config: Config) -> None:
 
                     parsed_message, _ = renderer.parse_response(sampled_tokens)
                     content = renderers.get_text_content(parsed_message)
-                    reward = score(content, traj, config.reward_fn)
+                    reward = coverage_reward(content, traj)
 
                     sampled_tokens_G_T.append(sampled_tokens)
                     logprobs_G_T.append(sampled_logprobs)
