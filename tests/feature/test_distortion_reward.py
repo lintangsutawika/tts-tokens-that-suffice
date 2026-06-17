@@ -42,7 +42,7 @@ import litellm
 _REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from tts.utils.logprob import score_completion
+from tts.utils.logprob import inspect_score_completion, score_completion
 from tts.utils.summary_utils import format_continuation, parse_messages, render_template
 from tts.utils.trajectory import chunk_trajectory_by_assistant
 
@@ -202,11 +202,18 @@ def compute_distortion_reward(
     partial_messages: list[dict],
     summary: str,
     continuation_messages: list[dict],
+    inspect: bool = False,
 ) -> dict:
     """
     Compute the KL-distortion reward components.
 
-    r(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, z) − log p(y_t | y<t, x)]
+    distortion(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, x) − log p(y_t | y<t, z)]
+
+    This is an unbiased Monte Carlo estimate of D_KL(p(·|x) ‖ p(·|z)) using the
+    actual continuation y as a sample drawn from p(·|x). No probability weighting
+    is applied — the log-ratio is the correct estimator for this KL direction.
+
+    fidelity = −distortion  (positive means z preserves information well)
 
     Returns a dict with fidelity, per-context mean logprobs, and token count.
     """
@@ -214,7 +221,15 @@ def compute_distortion_reward(
     task = _extract_task(partial_messages)
 
     x_messages = _build_x_scoring_messages(partial_messages)
-    z_messages = _build_z_scoring_messages(summary, task)
+    # z_messages = _build_z_scoring_messages(summary, task)
+    z_messages = _build_z_scoring_messages("", "")
+    # z_messages = x_messages.copy()
+
+    if inspect:
+        print("\n  === inspect x-context ===")
+        inspect_score_completion(x_messages, y_text, model, base_url)
+        print("\n  === inspect z-context ===")
+        inspect_score_completion(z_messages, y_text, model, base_url)
 
     print(f"    Scoring y ({len(y_text)} chars) against x-context")
     lp_x = score_completion(x_messages, y_text, model, base_url)
@@ -224,18 +239,28 @@ def compute_distortion_reward(
 
     if lp_x is None or lp_z is None:
         return {
-            "error": "Backend does not support /v1/completions with echo=True. "
-                     "Enable vLLM with --enable-prefix-caching or use a compatible server.",
+            "error": "Backend does not support /v1/completions with echo=True.",
             "fidelity": None,
         }
+
+    # Warn if tokenization differed at the context boundary — KL would be
+    # comparing log-probs for different tokens across x and z.
+    if len(lp_x) != len(lp_z):
+        print(
+            f"    WARNING: token count mismatch lp_x={len(lp_x)} lp_z={len(lp_z)}. "
+            "Context boundary tokenization differs — KL estimate may be inaccurate."
+        )
 
     n = min(len(lp_x), len(lp_z))
     if n == 0:
         return {"error": "No completion tokens scored", "fidelity": None}
 
-    fidelity = sum(lp_z[t] - lp_x[t] for t in range(n)) / n
+    # distortion: how much worse z is at predicting y than x (should be >= 0)
+    distortion = sum(lp_x[t] - lp_z[t] for t in range(n)) / n
+    fidelity = -distortion
     return {
         "fidelity": fidelity,
+        "distortion": distortion,
         "n_tokens": n,
         "lp_x_mean": sum(lp_x[:n]) / n,
         "lp_z_mean": sum(lp_z[:n]) / n,
@@ -258,6 +283,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fixture", default=str(FIXTURE), help="Path to trajectory JSON file")
     p.add_argument("--save", default=None, metavar="PATH",
                    help="Save generated summaries (and reward results) to a JSONL file")
+    p.add_argument("--inspect", action="store_true",
+                   help="Print raw token/logprob structure to verify KL alignment")
     return p.parse_args()
 
 
@@ -318,6 +345,7 @@ def main() -> None:
         partial_messages=partial,
         summary=summary,
         continuation_messages=continuation,
+        inspect=args.inspect,
     )
 
     print()
@@ -325,12 +353,12 @@ def main() -> None:
     if "error" in result:
         print(f"    ERROR: {result['error']}")
     else:
-        print(f"    fidelity (r before λ|z|) : {result['fidelity']:.4f}")
-        print(f"    n_tokens (|y|)            : {result['n_tokens']}")
-        print(f"    mean log p(y|x)  (teacher): {result['lp_x_mean']:.4f}")
-        print(f"    mean log p(y|z)  (student): {result['lp_z_mean']:.4f}")
-        print(f"    KL estimate D(p(y|x)‖p(y|z)): {-result['fidelity']:.4f} nats/token")
-        if result["fidelity"] >= -0.5:
+        print(f"    distortion D_KL(p(y|x)‖p(y|z)): {result['distortion']:.4f} nats/token")
+        print(f"    fidelity (−distortion)           : {result['fidelity']:.4f}")
+        print(f"    n_tokens (|y|)                   : {result['n_tokens']}")
+        print(f"    mean log p(y|x)  (teacher)       : {result['lp_x_mean']:.4f}")
+        print(f"    mean log p(y|z)  (student)       : {result['lp_z_mean']:.4f}")
+        if result["distortion"] <= 0.5:
             print("    ✓ Summary preserves most predictive information (low distortion)")
         else:
             print("    ✗ Summary loses significant predictive information (high distortion)")
