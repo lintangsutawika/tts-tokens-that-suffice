@@ -9,7 +9,7 @@ Steps:
   1. Load example.json (a real coding-agent conversation trajectory)
   2. Cut messages at index :cut_index using tts.utils.trajectory utilities
   3. Render the summarization prompt exactly as SummarizationAgent.chat_completions does
-  4. Generate a summary via a vLLM-compatible server
+  4. Generate a summary via a vLLM-compatible server (litellm)
   5. Score the continuation against both the full context (x) and the summary (z)
      to compute the per-token KL distortion reward:
          r = (1/|y|) Σ_t [log p(y_t|y<t, z) − log p(y_t|y<t, x)]
@@ -33,8 +33,7 @@ import re
 import sys
 from pathlib import Path
 
-import httpx
-import openai
+import litellm
 
 # ---------------------------------------------------------------------------
 # Path setup — allows running as a script without installing the package
@@ -43,8 +42,9 @@ import openai
 _REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
+from tts.utils.logprob import score_completion
+from tts.utils.summary_utils import format_continuation, parse_messages, render_template
 from tts.utils.trajectory import chunk_trajectory_by_assistant
-from tts.utils.summary_utils import render_template
 
 # ---------------------------------------------------------------------------
 # Inline DEFAULT_INSTANCE_TEMPLATE from summarization_agent.py
@@ -85,9 +85,6 @@ def cut_trajectory(messages: list[dict], cut_index: int) -> tuple[list[dict], li
 
     Returns (partial, continuation) where partial = messages[:cut_index]
     and continuation = messages[cut_index:].
-
-    Uses chunk_trajectory_by_assistant to report the chunk count for
-    diagnostic purposes.
     """
     partial = messages[:cut_index]
     continuation = messages[cut_index:]
@@ -120,46 +117,6 @@ def _extract_task(messages: list[dict]) -> str:
     return ""
 
 
-def _parse_example_messages(messages: list[dict]) -> list[str]:
-    """
-    Convert example.json messages to the event-string list that
-    SummarizationAgent.chat_completions passes to the Jinja2 template.
-
-    Mirrors tts.utils.summary_utils.parse_messages() but adapted to the
-    example.json wire format:
-      - assistant: tool_calls[0].function.arguments is a dict (not a string)
-      - tool:      content holds the raw output directly (no extra.raw_output)
-    """
-    events: list[str] = []
-    msg_string = ""
-    for msg in messages:
-        role = msg.get("role", "")
-        if role in ("system", "user"):
-            continue
-        if role == "assistant":
-            content = msg.get("content") or ""
-            tool_calls = msg.get("tool_calls") or []
-            if tool_calls:
-                fn_args = tool_calls[0].get("function", {}).get("arguments", {})
-                if isinstance(fn_args, dict):
-                    # Pretty-print the arguments dict (e.g. {"command": "..."})
-                    fn_name = tool_calls[0].get("function", {}).get("name", "tool")
-                    args_str = json.dumps(fn_args, indent=2)
-                    msg_string += f"{content}\nTool({fn_name}): {args_str}"
-                else:
-                    msg_string += f"{content}\nTool: {fn_args}"
-            else:
-                msg_string += content
-        elif role == "tool":
-            raw_output = msg.get("content", "")
-            if len(raw_output) > 5000:
-                raw_output = raw_output[:2500] + "\n...[truncated]..." + raw_output[-2500:]
-            msg_string += f"\nEnvironment:\n{raw_output}"
-            events.append(msg_string)
-            msg_string = ""
-    return events
-
-
 def build_summary_prompt(
     partial_messages: list[dict],
     previous_summary: list[str] | None = None,
@@ -170,7 +127,7 @@ def build_summary_prompt(
     Returns a single-element list [{"role": "user", "content": <rendered>}].
     """
     task = _extract_task(partial_messages)
-    events = _parse_example_messages(partial_messages)
+    events = parse_messages(partial_messages)
 
     template_vars = {
         "task": task,
@@ -186,7 +143,6 @@ def show_rendered_prompt(chat_messages: list[dict]) -> None:
     content = chat_messages[0]["content"]
     lines = content.splitlines()
     print(f"[2] Rendered summary prompt ({len(lines)} lines, {len(content)} chars):")
-    # Show the task section and first event
     preview_lines = min(30, len(lines))
     for line in lines[:preview_lines]:
         print(f"    {line}")
@@ -199,16 +155,18 @@ def show_rendered_prompt(chat_messages: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def generate_summary(
-    client: openai.OpenAI,
     model: str,
+    api_base: str,
     chat_messages: list[dict],
-    max_tokens: int = 512,
+    max_tokens: int = 4096,
     temperature: float = 0.6,
 ) -> str:
-    """Generate a trajectory summary via the vLLM chat completions endpoint."""
-    response = client.chat.completions.create(
+    """Generate a trajectory summary via litellm chat completions."""
+    response = litellm.completion(
         model=model,
         messages=chat_messages,
+        api_base=api_base,
+        api_key="dummy",
         max_tokens=max_tokens,
         temperature=temperature,
     )
@@ -219,126 +177,23 @@ def generate_summary(
 # Step 4: distortion reward scoring
 # ---------------------------------------------------------------------------
 
-def _format_continuation_text(continuation_messages: list[dict]) -> str:
-    """
-    Flatten continuation messages into a compact text block (y).
-
-    We extract each assistant action (reasoning + tool call) and tool output
-    so the scoring prompt is readable and consistent with the partial-trajectory
-    format used in the x-context.
-    """
-    lines: list[str] = []
-    for msg in continuation_messages:
-        role = msg.get("role", "")
-        if role == "assistant":
-            reasoning = msg.get("reasoning_content") or ""
-            tool_calls = msg.get("tool_calls") or []
-            if reasoning:
-                lines.append(f"[Reasoning] {reasoning.strip()[:300]}")
-            for tc in tool_calls:
-                fn = tc.get("function", {})
-                fn_name = fn.get("name", "tool")
-                args = fn.get("arguments", {})
-                if isinstance(args, dict):
-                    lines.append(f"[Action] {fn_name}: {json.dumps(args)}")
-                else:
-                    lines.append(f"[Action] {fn_name}: {args}")
-        elif role == "tool":
-            raw = msg.get("content", "")
-            if len(raw) > 1000:
-                raw = raw[:500] + "\n...[truncated]..." + raw[-500:]
-            lines.append(f"[Observation] {raw.strip()}")
-    return "\n".join(lines)
-
-
-def _score_tokens_via_completions(
-    base_url: str,
-    model: str,
-    context_text: str,
-    completion_text: str,
-) -> list[float] | None:
-    """
-    Compute per-token log p(completion_text | context_text) using the
-    /v1/completions endpoint with echo=True and logprobs=1.
-
-    Returns a list of log-probs (one per completion token), or None if the
-    backend does not support this feature.
-
-    The context boundary is found by first submitting the context alone (with
-    max_tokens=1 to get a non-empty response), counting its prompt tokens, then
-    extracting the completion positions from the combined prompt+completion call.
-    """
-    if not completion_text.strip():
-        return []
-
-    full_prompt = context_text + completion_text
-    headers = {"Content-Type": "application/json"}
-
-    # 1. Count tokens in context alone
-    try:
-        ctx_resp = httpx.post(
-            f"{base_url}/v1/completions",
-            json={
-                "model": model,
-                "prompt": context_text,
-                "max_tokens": 1,
-                "echo": True,
-                "logprobs": 1,
-            },
-            timeout=30,
-        )
-        ctx_resp.raise_for_status()
-        ctx_data = ctx_resp.json()
-        ctx_token_logprobs = ctx_data["choices"][0]["logprobs"]["token_logprobs"]
-        n_ctx_tokens = len(ctx_token_logprobs)
-    except Exception as exc:
-        print(f"    [score] Context tokenization failed: {exc}")
-        return None
-
-    # 2. Score full prompt+completion
-    try:
-        full_resp = httpx.post(
-            f"{base_url}/v1/completions",
-            json={
-                "model": model,
-                "prompt": full_prompt,
-                "max_tokens": 0,
-                "echo": True,
-                "logprobs": 1,
-            },
-            timeout=60,
-        )
-        full_resp.raise_for_status()
-        full_data = full_resp.json()
-        all_logprobs = full_data["choices"][0]["logprobs"]["token_logprobs"]
-    except Exception as exc:
-        print(f"    [score] Full prompt scoring failed: {exc}")
-        return None
-
-    # Extract only the completion token logprobs (skip None for first BOS token)
-    completion_logprobs = [lp for lp in all_logprobs[n_ctx_tokens:] if lp is not None]
-    return completion_logprobs
-
-
-def _build_x_scoring_text(partial_messages: list[dict]) -> str:
-    """Plain-text x-context: 'here are the agent steps, what happens next?'"""
+def _build_x_scoring_messages(partial_messages: list[dict]) -> list[dict]:
+    """x-context as a chat message list: full agent history so far."""
     task = _extract_task(partial_messages)
-    events = _parse_example_messages(partial_messages)
+    events = parse_messages(partial_messages)
     event_block = "\n\n".join(f"[Event {i+1}]\n{e}" for i, e in enumerate(events))
-    return (
-        f"Task:\n{task}\n\n"
-        f"Agent actions so far:\n{event_block}\n\n"
-        f"Next agent actions:\n"
-    )
+    return [
+        {"role": "system", "content": f"Task:\n{task}"},
+        {"role": "user", "content": f"Agent actions so far:\n{event_block}\n\nContinue:"},
+    ]
 
 
-def _build_z_scoring_text(summary: str, task: str) -> str:
-    """Plain-text z-context: 'here is the summary, what happens next?'"""
-    return (
-        f"Task:\n{task}\n\n"
-        f"Agent progress summary:\n{summary}\n\n"
-        f"Next agent actions:\n"
-    )
+def _build_z_scoring_messages(summary: str, task: str) -> list[dict]:
+    """z-context as a chat message list: compressed summary only."""
+    return [
+        {"role": "system", "content": f"Task:\n{task}"},
+        {"role": "user", "content": f"Agent progress summary:\n{summary}\n\nContinue:"},
+    ]
 
 
 def compute_distortion_reward(
@@ -355,17 +210,17 @@ def compute_distortion_reward(
 
     Returns a dict with fidelity, per-context mean logprobs, and token count.
     """
-    y_text = _format_continuation_text(continuation_messages)
+    y_text = format_continuation(continuation_messages)
     task = _extract_task(partial_messages)
 
-    x_text = _build_x_scoring_text(partial_messages)
-    z_text = _build_z_scoring_text(summary, task)
+    x_messages = _build_x_scoring_messages(partial_messages)
+    z_messages = _build_z_scoring_messages(summary, task)
 
-    print(f"    Scoring y ({len(y_text)} chars) against x-context ({len(x_text)} chars)")
-    lp_x = _score_tokens_via_completions(base_url, model, x_text, y_text)
+    print(f"    Scoring y ({len(y_text)} chars) against x-context")
+    lp_x = score_completion(x_messages, y_text, model, base_url)
 
-    print(f"    Scoring y against z-context ({len(z_text)} chars)")
-    lp_z = _score_tokens_via_completions(base_url, model, z_text, y_text)
+    print(f"    Scoring y against z-context (summary {len(summary)} chars)")
+    lp_z = score_completion(z_messages, y_text, model, base_url)
 
     if lp_x is None or lp_z is None:
         return {
@@ -434,14 +289,16 @@ def main() -> None:
     # Step 3: Generate summary
     # -----------------------------------------------------------------------
     print()
-    print("[3] Generating summary via vLLM ...")
-    client = openai.OpenAI(base_url=f"{base_url}/v1", api_key="dummy")
+    print("[3] Generating summary via litellm ...")
     try:
         summary = generate_summary(
-            client, args.model, chat_messages,
-            max_tokens=args.max_tokens, temperature=args.temperature,
+            model=args.model,
+            api_base=base_url,
+            chat_messages=chat_messages,
+            max_tokens=args.max_tokens,
+            temperature=args.temperature,
         )
-    except openai.APIConnectionError as exc:
+    except Exception as exc:
         print(f"    ERROR: Cannot reach server at {base_url}: {exc}")
         print("    Start the server with: vllm serve <model> --port 8000")
         sys.exit(1)
