@@ -178,22 +178,29 @@ def generate_summary(
 # ---------------------------------------------------------------------------
 
 def _build_x_scoring_messages(partial_messages: list[dict]) -> list[dict]:
-    """x-context as a chat message list: full agent history so far."""
-    task = _extract_task(partial_messages)
-    events = parse_messages(partial_messages)
-    event_block = "\n\n".join(f"[Event {i+1}]\n{e}" for i, e in enumerate(events))
-    return [
-        {"role": "system", "content": f"Task:\n{task}"},
-        {"role": "user", "content": f"Agent actions so far:\n{event_block}\n\nContinue:"},
-    ]
+    """x-context: the full original message history."""
+    return partial_messages
 
 
-def _build_z_scoring_messages(summary: str, task: str) -> list[dict]:
-    """z-context as a chat message list: compressed summary only."""
-    return [
-        {"role": "system", "content": f"Task:\n{task}"},
-        {"role": "user", "content": f"Agent progress summary:\n{summary}\n\nContinue:"},
-    ]
+def _build_z_scoring_messages(
+    summary: str,
+    partial_messages: list[dict],
+    keep: int = 3,
+) -> list[dict]:
+    """
+    z-context: the compressed trajectory that SummarizationAgent produces.
+
+    Structure mirrors compacting N messages to:
+      [system, user(task), user(summary), *partial[-keep:]]
+
+    The last `keep` messages are kept verbatim so the agent still sees
+    the most recent tool outputs and actions.
+    """
+    system_msg = next((m for m in partial_messages if m.get("role") == "system"), None)
+    user_msg = next((m for m in partial_messages if m.get("role") == "user"), None)
+    summary_msg = {"role": "user", "content": f"<summary>\n{summary}\n</summary>"}
+    recent = partial_messages[-keep:] if keep > 0 else []
+    return [m for m in [system_msg, user_msg, summary_msg] if m] + recent
 
 
 def compute_distortion_reward(
@@ -202,6 +209,7 @@ def compute_distortion_reward(
     partial_messages: list[dict],
     summary: str,
     continuation_messages: list[dict],
+    keep: int = 3,
     inspect: bool = False,
 ) -> dict:
     """
@@ -209,20 +217,14 @@ def compute_distortion_reward(
 
     distortion(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, x) − log p(y_t | y<t, z)]
 
-    This is an unbiased Monte Carlo estimate of D_KL(p(·|x) ‖ p(·|z)) using the
-    actual continuation y as a sample drawn from p(·|x). No probability weighting
-    is applied — the log-ratio is the correct estimator for this KL direction.
-
-    fidelity = −distortion  (positive means z preserves information well)
+    x = full original partial_messages
+    z = compressed trajectory: [system, user(task), summary, *partial[-keep:]]
 
     Returns a dict with fidelity, per-context mean logprobs, and token count.
     """
     y_text = format_continuation(continuation_messages)
-    task = _extract_task(partial_messages)
-
     x_messages = _build_x_scoring_messages(partial_messages)
-    # z_messages = _build_z_scoring_messages(summary, task)
-    z_messages = _build_z_scoring_messages("", "")
+    z_messages = _build_z_scoring_messages(summary, partial_messages, keep=keep)
     # z_messages = x_messages.copy()
 
     if inspect:
@@ -262,6 +264,8 @@ def compute_distortion_reward(
         "fidelity": fidelity,
         "distortion": distortion,
         "n_tokens": n,
+        "n_x_messages": len(x_messages),
+        "n_z_messages": len(z_messages),
         "lp_x_mean": sum(lp_x[:n]) / n,
         "lp_z_mean": sum(lp_z[:n]) / n,
         "lp_x_total": sum(lp_x[:n]),
@@ -285,6 +289,10 @@ def parse_args() -> argparse.Namespace:
                    help="Save generated summaries (and reward results) to a JSONL file")
     p.add_argument("--inspect", action="store_true",
                    help="Print raw token/logprob structure to verify KL alignment")
+    p.add_argument("--summary-file", default=None, metavar="PATH",
+                   help="Load pre-computed summary from a .txt file; skips generation step")
+    p.add_argument("--keep", type=int, default=3,
+                   help="Verbatim recent messages to retain in z-context (default: 3)")
     return p.parse_args()
 
 
@@ -313,22 +321,27 @@ def main() -> None:
     show_rendered_prompt(chat_messages)
 
     # -----------------------------------------------------------------------
-    # Step 3: Generate summary
+    # Step 3: Load or generate summary
     # -----------------------------------------------------------------------
     print()
-    print("[3] Generating summary via litellm ...")
-    try:
-        summary = generate_summary(
-            model=args.model,
-            api_base=base_url,
-            chat_messages=chat_messages,
-            max_tokens=args.max_tokens,
-            temperature=args.temperature,
-        )
-    except Exception as exc:
-        print(f"    ERROR: Cannot reach server at {base_url}: {exc}")
-        print("    Start the server with: vllm serve <model> --port 8000")
-        sys.exit(1)
+    if args.summary_file:
+        summary_path = Path(args.summary_file)
+        print(f"[3] Loading summary from {summary_path} ...")
+        summary = summary_path.read_text()
+    else:
+        print("[3] Generating summary via litellm ...")
+        try:
+            summary = generate_summary(
+                model=args.model,
+                api_base=base_url,
+                chat_messages=chat_messages,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature,
+            )
+        except Exception as exc:
+            print(f"    ERROR: Cannot reach server at {base_url}: {exc}")
+            print("    Start the server with: vllm serve <model> --port 8000")
+            sys.exit(1)
 
     print(f"    Summary ({len(summary)} chars):")
     for line in summary.splitlines():
@@ -345,6 +358,7 @@ def main() -> None:
         partial_messages=partial,
         summary=summary,
         continuation_messages=continuation,
+        keep=args.keep,
         inspect=args.inspect,
     )
 
@@ -353,6 +367,8 @@ def main() -> None:
     if "error" in result:
         print(f"    ERROR: {result['error']}")
     else:
+        print(f"    x messages (before)              : {result['n_x_messages']}")
+        print(f"    z messages (after)               : {result['n_z_messages']}  (compression {result['n_x_messages']}→{result['n_z_messages']})")
         print(f"    distortion D_KL(p(y|x)‖p(y|z)): {result['distortion']:.4f} nats/token")
         print(f"    fidelity (−distortion)           : {result['fidelity']:.4f}")
         print(f"    n_tokens (|y|)                   : {result['n_tokens']}")
