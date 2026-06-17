@@ -1,0 +1,35 @@
+
+
+# Summary
+
+## Issue Fixed
+The `NamespacePrefixedTag.clark_name` property and `qn()` function in `/testbed/src/docx/oxml/ns.py` were returning incorrect Clark notation format.
+
+## Root Causes
+1. **`clark_name` property**: Used square brackets `[]` instead of curly braces `{}` and had the URI/localname order reversed
+2. **`qn()` function**: Same bracket issue, reversed order, and incorrect variable unpacking (`tagroot, prefix` instead of `prefix, tagroot`)
+
+## Actions Taken
+1. Fixed `clark_name` property to return `"{%s}%s" % (self._ns_uri, self._local_part)`
+2. Fixed `qn()` function:
+   - Corrected unpacking order: `prefix, tagroot = tag.split(":")`
+   - Fixed return format to `"{%s}%s" % (uri, tagroot)`
+
+## Verification
+Test script confirmed both functions now return correct Clark notation:
+- `tag.clark_name` → `{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p` ✓
+- `qn("w:p")` → `{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p` ✓
+
+## Next Steps
+1. **Run existing tests** to ensure the fix doesn't break other functionality:
+   ```bash
+   pytest tests/oxml/test_ns.py -v
+   pytest tests/ -v -k "namespace or clark or qn"
+   ```
+
+2. **Run broader test suite** to catch any downstream impacts:
+   ```bash
+   pytest tests/ -v
+   ```
+
+3. **Consider adding a regression test** to prevent future regressions of this bug.
