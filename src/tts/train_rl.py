@@ -3,13 +3,38 @@ RL recipe: teach a model to summarize partial coding agent trajectories via
 GRPO-style reward centering.
 
 For each trajectory in the batch the model generates `group_size` candidate
-summaries. Each candidate is scored by the coverage reward; advantages are
+summaries. Each candidate is scored by the selected reward; advantages are
 computed as reward – group_mean (reward centering). Policy gradients are
 applied via the importance-sampling loss.
 
-Coverage reward: fraction of tool names and file names that appear in the
-generated summary, extracted from both the partial trajectory (steps) and
-the continuation. Reference-free — no teacher summaries needed at training time.
+Two reward functions are available (set via Config.reward_fn):
+
+  "coverage"   (default)
+    Fraction of tool names and file names from the full trajectory
+    (steps + continuation) that appear in the generated summary.
+    Reference-free, cheap, and a useful proxy for distortion.
+
+  "distortion"
+    KL-distortion fidelity from "Tokens That Suffice" / Readable Context
+    Distillation.  Measures how much predictive information the summary z
+    preserves relative to the original steps x, with respect to predicting
+    the continuation y:
+
+        r(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, z) − log p(y_t | y<t, x)] − λ·|z|
+
+    x  = partial trajectory steps (the "seen" context)
+    z  = generated summary (the compression)
+    y  = continuation steps (what the agent does next, stored in trajectory)
+    λ  = distortion_lambda length-penalty coefficient
+
+    Forward KL is used (mass-covering): the summary must preserve *all* likely
+    next-step distributions, not just the mode.  The fidelity term is
+    non-positive; GRPO centering removes the per-trajectory constant
+    −H(p(y|x)) so advantage signals reflect only relative group quality.
+
+    Requires the serving backend to support returning logprobs for prompt
+    tokens (SamplingParams(prompt_logprobs=1)).  Falls back to 0.0 and emits
+    a warning if the backend does not support this.
 
 Variable naming convention (mirrors rl_loop.py):
     _P  Problem dimension  (different trajectories in a batch)
@@ -46,6 +71,7 @@ from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tts.data.agent_trajectory import (
     AgentTrajectory,
     SYSTEM_PROMPT,
+    TrajectoryStep,
     format_trajectory_text,
     load_trajectories,
 )
@@ -68,13 +94,18 @@ class Config:
     save_every: int = 20
     ttl_seconds: int | None = 604800
     num_epochs: int = 1
+    # Reward function: "coverage" or "distortion"
+    reward_fn: str = "coverage"
+    # Length-penalty coefficient λ for the distortion reward.
+    # Positive values encourage shorter summaries.
+    distortion_lambda: float = 0.0
 
 
 # ---------------------------------------------------------------------------
-# Reward
+# Coverage reward
 # ---------------------------------------------------------------------------
 
-def _extract_entities(steps: list) -> set[str]:
+def _extract_entities(steps: list[TrajectoryStep]) -> set[str]:
     """Extract tool names and file basenames from a list of TrajectoryStep."""
     entities: set[str] = set()
     for step in steps:
@@ -104,12 +135,159 @@ def coverage_reward(summary: str, trajectory: AgentTrajectory) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Distortion reward
+# ---------------------------------------------------------------------------
+
+# Shared system prompt for next-step prediction, used by both the x-context
+# (full steps) and z-context (summary) scoring prompts so that the KL
+# comparison is apples-to-apples.
+_SCORING_SYSTEM_PROMPT = (
+    "You are an expert at predicting what a coding agent will do next. "
+    "Given the context below, reproduce the agent's next actions and tool "
+    "observations in sequence."
+)
+
+
+def _build_x_scoring_prompt(traj: AgentTrajectory, renderer) -> types.ModelInput:
+    """Full-context (x) prompt for scoring: raw trajectory steps shown verbatim."""
+    convo = [
+        {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+        {"role": "user", "content": format_trajectory_text(traj.steps, traj.task)},
+    ]
+    return renderer.build_generation_prompt(convo)
+
+
+def _build_z_scoring_prompt(summary: str, task: str, renderer) -> types.ModelInput:
+    """Summary-context (z) prompt for scoring: summary replaces the raw steps."""
+    user_content = f"[Task]\n{task}\n\n[Agent Progress Summary]\n{summary}"
+    convo = [
+        {"role": "system", "content": _SCORING_SYSTEM_PROMPT},
+        {"role": "user", "content": user_content},
+    ]
+    return renderer.build_generation_prompt(convo)
+
+
+def _continuation_tokens(traj: AgentTrajectory, tokenizer) -> list[int]:
+    """Tokenize the continuation steps as a compact text sequence (y)."""
+    parts: list[str] = []
+    for step in traj.continuation:
+        if step.content:
+            parts.append(step.content.strip())
+        for tc in step.tool_calls:
+            parts.append(tc.name)
+    text = "\n".join(parts)
+    return tokenizer.encode(text, add_special_tokens=False)
+
+
+def _score_tokens(
+    context_prompt: types.ModelInput,
+    target_tokens: list[int],
+    sampling_client,
+) -> list[float] | None:
+    """
+    Return per-token log p(y_t | y<t, context) for each token in target_tokens.
+
+    Appends target_tokens to context_prompt and requests the backend to return
+    logprobs for all prompt positions (prompt_logprobs mode).  This is a
+    forward-only operation on the frozen sampling_client snapshot — no gradients
+    are accumulated in the training state.
+
+    Returns None if the backend does not support prompt_logprobs.
+
+    Backend requirement: SamplingParams(max_tokens=0, prompt_logprobs=1) and
+    sequence.prompt_logprobs must be available.  vLLM (the typical tinker
+    backend) exposes both via its /v1/completions endpoint.
+    """
+    if not target_tokens:
+        return []
+    full_input = context_prompt.append(types.EncodedTextChunk(tokens=target_tokens))
+    try:
+        score_params = types.SamplingParams(max_tokens=0, prompt_logprobs=1)
+        result = sampling_client.sample(
+            prompt=full_input,
+            num_samples=1,
+            sampling_params=score_params,
+        ).result()
+        seq = result.sequences[0]
+        # prompt_logprobs[i] is log p(token_i | token_0..i-1).
+        # The first context_prompt.length positions are the context; the
+        # remaining len(target_tokens) positions are the target.
+        offset = context_prompt.length
+        return list(seq.prompt_logprobs[offset : offset + len(target_tokens)])
+    except (AttributeError, TypeError, IndexError) as exc:
+        logger.debug("_score_tokens: backend error (%s)", exc)
+        return None
+
+
+def distortion_reward(
+    traj: AgentTrajectory,
+    summary: str,
+    summary_tokens: list[int],
+    sampling_client,
+    renderer,
+    tokenizer,
+    lambda_len: float = 0.0,
+) -> float:
+    """
+    KL-distortion fidelity reward from "Tokens That Suffice".
+
+    r(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, z) − log p(y_t | y<t, x)] − λ·|z|
+
+    The fidelity term is ≤ 0: it equals 0 when z is a perfect sufficient
+    statistic for x w.r.t. predicting y, and decreases as z loses information.
+
+    GRPO centering removes the per-trajectory constant −H(p(y|x)) from the
+    group mean, so the advantage signal captures only within-group quality
+    differences — analogous to how GRPO cancels the baseline in standard RL.
+
+    Direction: forward KL D_KL(p(y|x) ∥ p(y|z)) is mass-covering.  The summary
+    must keep the model's full predictive mass over likely continuations, not
+    just collapse to the mode.  This is the direction that equals I(Y;X)−I(Y;Z).
+
+    Falls back to 0.0 (with a warning) if the backend does not support
+    prompt_logprobs.  Switch to reward_fn=coverage in that case.
+    """
+    if not traj.continuation:
+        return 0.0
+
+    y_tokens = _continuation_tokens(traj, tokenizer)
+    if not y_tokens:
+        return 0.0
+
+    x_prompt = _build_x_scoring_prompt(traj, renderer)
+    z_prompt = _build_z_scoring_prompt(summary, traj.task, renderer)
+
+    lp_x = _score_tokens(x_prompt, y_tokens, sampling_client)
+    lp_z = _score_tokens(z_prompt, y_tokens, sampling_client)
+
+    if lp_x is None or lp_z is None:
+        logger.warning(
+            "distortion_reward: backend does not support prompt_logprobs; "
+            "returning 0.0. Use reward_fn=coverage or enable prompt_logprobs."
+        )
+        return 0.0
+
+    n = min(len(lp_x), len(lp_z))
+    if n == 0:
+        return 0.0
+
+    # fidelity = (1/|y|) Σ_t [log p(y_t|y<t,z) − log p(y_t|y<t,x)] ≤ 0
+    fidelity = sum(lp_z[t] - lp_x[t] for t in range(n)) / n
+    return fidelity - lambda_len * len(summary_tokens)
+
+
+# ---------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------
 
 def main(config: Config) -> None:
     if not config.dataset_path:
         raise ValueError("dataset_path must be set to a JSONL file of trajectories")
+
+    if config.reward_fn not in ("coverage", "distortion"):
+        raise ValueError(
+            f"reward_fn must be 'coverage' or 'distortion', got {config.reward_fn!r}"
+        )
 
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
@@ -123,6 +301,7 @@ def main(config: Config) -> None:
     renderer_name = model_info.get_recommended_renderer_name(config.model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer)
     logger.info("Using renderer: %s", renderer_name)
+    logger.info("Using reward_fn: %s", config.reward_fn)
 
     logger.info("Loading trajectories from %s", config.dataset_path)
     trajectories = load_trajectories(config.dataset_path)
@@ -204,7 +383,10 @@ def main(config: Config) -> None:
                 batch_start : batch_start + config.batch_size
             ]
 
-            # Snapshot weights so sampling is consistent within the batch
+            # Snapshot weights so sampling is consistent within the batch.
+            # For the distortion reward this same snapshot is used for the
+            # prompt_logprobs scoring calls, so teacher and decoder are the
+            # same frozen checkpoint throughout the reward computation.
             sampling_client = training_client.save_weights_and_get_sampling_client()
 
             # --- Rollout phase ---
@@ -246,7 +428,19 @@ def main(config: Config) -> None:
 
                     parsed_message, _ = renderer.parse_response(sampled_tokens)
                     content = renderers.get_text_content(parsed_message)
-                    reward = coverage_reward(content, traj)
+
+                    if config.reward_fn == "distortion":
+                        reward = distortion_reward(
+                            traj=traj,
+                            summary=content,
+                            summary_tokens=sampled_tokens,
+                            sampling_client=sampling_client,
+                            renderer=renderer,
+                            tokenizer=tokenizer,
+                            lambda_len=config.distortion_lambda,
+                        )
+                    else:
+                        reward = coverage_reward(content, traj)
 
                     sampled_tokens_G_T.append(sampled_tokens)
                     logprobs_G_T.append(sampled_logprobs)
