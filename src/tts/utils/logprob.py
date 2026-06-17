@@ -37,7 +37,7 @@ def score_completion(
 
     try:
         ctx_resp = litellm.text_completion(
-            model=model,
+            model=model.replace("litellm_proxy/", "hosted_vllm/"),
             # base_url=f"{base}/v1",
             base_url=base,
             prompt=context_text,
@@ -54,7 +54,7 @@ def score_completion(
 
     try:
         full_resp = litellm.text_completion(
-            model=model,
+            model=model.replace("litellm_proxy/", "hosted_vllm/"),
             # base_url=f"{base}/v1",
             base_url=base,
             prompt=full_prompt,
