@@ -58,7 +58,7 @@ apptainer exec \
         rm -f /tmp/tinker.db /skyrl/skyrl/tinker/tinker.db &&
         ln -sf /tmp/tinker.db /skyrl/skyrl/tinker/tinker.db &&
         cd /skyrl &&
-        uv run --no-sync --extra tinker --extra fsdp -m tts.tinker.api \
+        uv run --no-sync --extra tinker --extra fsdp -m skyrl.tinker.api \
             --base-model 'Qwen/Qwen3-8B' \
             --backend fsdp \
             --port 9123 \
