@@ -3,8 +3,9 @@
 SkyRL-backed tinker API server for `tts-tokens-that-suffice`, packaged as a
 self-contained ROCm (AMD GPU) Apptainer image.
 
-Runs `tts.tinker.api` — a thin wrapper around `skyrl.tinker.api` that adds the
-`/api/v1/client/config` endpoint required by newer tinker SDK versions.
+Runs SkyRL's `skyrl.tinker.api` directly. (Earlier a `tts.tinker.api` wrapper
+added the `/api/v1/client/config` endpoint; the pinned SkyRL now implements that
+natively, so the wrapper was dropped.)
 
 ## Stack
 
