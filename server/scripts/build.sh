@@ -1,6 +1,7 @@
 #!/bin/bash
 # Build a custom .sif with SkyRL pre-installed on top of the ROCm base image.
-# Run this once (or after updating the SkyRL submodule).
+# SkyRL is cloned at a pinned commit during the build (no git submodule).
+# Run this once (or after bumping SKYRL_COMMIT).
 # Usage: bash server/scripts/build.sh
 #
 # Stack (version-aligned with SkyRL's own pins, so no source patching/shims):
@@ -22,6 +23,8 @@ BUILT_SIF="$BASE_DIR/tts-server.sif"
 DEF_FILE="$SELF_DIR/tts-server.def"
 
 ROCM_INDEX="https://download.pytorch.org/whl/rocm7.2"
+SKYRL_REPO="https://github.com/NovaSky-AI/SkyRL.git"
+SKYRL_COMMIT="6c300c755178527e2c797277f2c48a47ed451626"
 
 # Pull the base image if needed
 if [ ! -f "$BASE_SIF" ]; then
@@ -34,15 +37,23 @@ cat > "$DEF_FILE" <<EOF
 Bootstrap: localimage
 From: $BASE_SIF
 
-%files
-    $SERVER_DIR/submodules/SkyRL /skyrl
-
 %post
     set -e
     # Use the base image's pytorch venv directly as the project environment.
     export VENV=/opt/venv
     export PATH=\$VENV/bin:\$PATH
     PY=\$VENV/bin/python
+
+    # Clone SkyRL at the pinned commit (no submodule). The patches we used to
+    # carry (LoRA->bf16 cast, gradient_checkpointing_use_reentrant=True, the
+    # _SKYRL_USE_NEW_INFERENCE import guard) were old torch-2.9/ROCm-7.0
+    # workarounds and are unnecessary on this torch-2.11/ROCm-7.2 stack.
+    rm -rf /skyrl
+    mkdir -p /skyrl && cd /skyrl
+    git init -q
+    git remote add origin $SKYRL_REPO
+    git fetch --depth 1 -q origin $SKYRL_COMMIT
+    git checkout -q FETCH_HEAD
 
     \$PY -m pip install -q uv
     # unsafe-best-match: consider all indexes for each package (the ROCm index
