@@ -53,7 +53,7 @@ bash server/scripts/run.sh rl
 checkpoints, and Ray's tmp dir, sets the ROCm/Ray GPU-visibility env, and runs:
 
 ```
-uv run --no-sync --extra tinker --extra fsdp -m tts.tinker.api \
+uv run --no-sync --extra tinker --extra fsdp -m skyrl.tinker.api \
     --base-model 'Qwen/Qwen3-8B' --backend fsdp --port 9123 \
     --checkpoints-base /checkpoints --backend-config <config/{sft,rl}.json>
 ```
