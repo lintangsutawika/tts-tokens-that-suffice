@@ -3,13 +3,38 @@ RL recipe: teach a model to summarize partial coding agent trajectories via
 GRPO-style reward centering.
 
 For each trajectory in the batch the model generates `group_size` candidate
-summaries. Each candidate is scored by the coverage reward; advantages are
+summaries. Each candidate is scored by the selected reward; advantages are
 computed as reward – group_mean (reward centering). Policy gradients are
 applied via the importance-sampling loss.
 
-Coverage reward: fraction of tool names and file names that appear in the
-generated summary, extracted from both the partial trajectory (steps) and
-the continuation. Reference-free — no teacher summaries needed at training time.
+Two reward functions are available (set via Config.reward_fn):
+
+  "coverage"   (default)
+    Fraction of tool names and file names from the full trajectory
+    (steps + continuation) that appear in the generated summary.
+    Reference-free, cheap, and a useful proxy for distortion.
+
+  "distortion"
+    KL-distortion fidelity from "Tokens That Suffice" / Readable Context
+    Distillation.  Measures how much predictive information the summary z
+    preserves relative to the original steps x, with respect to predicting
+    the continuation y:
+
+        r(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, z) − log p(y_t | y<t, x)] − λ·|z|
+
+    x  = partial trajectory steps (the "seen" context)
+    z  = generated summary (the compression)
+    y  = continuation steps (what the agent does next, stored in trajectory)
+    λ  = distortion_lambda length-penalty coefficient
+
+    Forward KL is used (mass-covering): the summary must preserve *all* likely
+    next-step distributions, not just the mode.  The fidelity term is
+    non-positive; GRPO centering removes the per-trajectory constant
+    −H(p(y|x)) so advantage signals reflect only relative group quality.
+
+    Requires the serving backend to support returning logprobs for prompt
+    tokens (SamplingParams(prompt_logprobs=1)).  Falls back to 0.0 and emits
+    a warning if the backend does not support this.
 
 Variable naming convention (mirrors rl_loop.py):
     _P  Problem dimension  (different trajectories in a batch)
@@ -46,9 +71,12 @@ from tinker_cookbook.utils.git_rev import recipe_user_metadata
 from tts.data.agent_trajectory import (
     AgentTrajectory,
     SYSTEM_PROMPT,
+    TrajectoryStep,
     format_trajectory_text,
     load_trajectories,
+    steps_to_messages,
 )
+from tts.reward.reverse_kl_reward import distortion_reward
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
@@ -68,13 +96,24 @@ class Config:
     save_every: int = 20
     ttl_seconds: int | None = 604800
     num_epochs: int = 1
+    # Reward function: "coverage" or "distortion"
+    reward_fn: str = "coverage"
+    # Length-penalty coefficient λ for the distortion reward.
+    # Positive values encourage shorter summaries.
+    distortion_lambda: float = 0.0
+    # URL of the vLLM scoring server (used only when reward_fn="distortion").
+    scoring_base_url: str = "http://localhost:8000/v1"
+    # Target message budget for the z-context. Tail = max_size//2 - keep_first messages.
+    distortion_max_size: int = 20
+    # Messages to keep verbatim from the start of the trajectory in z-context.
+    distortion_keep_first: int = 4
 
 
 # ---------------------------------------------------------------------------
-# Reward
+# Coverage reward
 # ---------------------------------------------------------------------------
 
-def _extract_entities(steps: list) -> set[str]:
+def _extract_entities(steps: list[TrajectoryStep]) -> set[str]:
     """Extract tool names and file basenames from a list of TrajectoryStep."""
     entities: set[str] = set()
     for step in steps:
@@ -111,6 +150,11 @@ def main(config: Config) -> None:
     if not config.dataset_path:
         raise ValueError("dataset_path must be set to a JSONL file of trajectories")
 
+    if config.reward_fn not in ("coverage", "distortion"):
+        raise ValueError(
+            f"reward_fn must be 'coverage' or 'distortion', got {config.reward_fn!r}"
+        )
+
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
         wandb_project=None,
@@ -123,6 +167,7 @@ def main(config: Config) -> None:
     renderer_name = model_info.get_recommended_renderer_name(config.model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer)
     logger.info("Using renderer: %s", renderer_name)
+    logger.info("Using reward_fn: %s", config.reward_fn)
 
     logger.info("Loading trajectories from %s", config.dataset_path)
     trajectories = load_trajectories(config.dataset_path)
@@ -204,7 +249,10 @@ def main(config: Config) -> None:
                 batch_start : batch_start + config.batch_size
             ]
 
-            # Snapshot weights so sampling is consistent within the batch
+            # Snapshot weights so sampling is consistent within the batch.
+            # For the distortion reward this same snapshot is used for the
+            # prompt_logprobs scoring calls, so teacher and decoder are the
+            # same frozen checkpoint throughout the reward computation.
             sampling_client = training_client.save_weights_and_get_sampling_client()
 
             # --- Rollout phase ---
@@ -246,7 +294,23 @@ def main(config: Config) -> None:
 
                     parsed_message, _ = renderer.parse_response(sampled_tokens)
                     content = renderers.get_text_content(parsed_message)
-                    reward = coverage_reward(content, traj)
+
+                    if config.reward_fn == "distortion":
+                        partial_messages = steps_to_messages(traj.steps, traj.task)
+                        continuation_messages = steps_to_messages(traj.continuation, traj.task)[2:]
+                        reward = distortion_reward(
+                            partial_messages=partial_messages,
+                            summary=content,
+                            continuation_messages=continuation_messages,
+                            model=config.model_name,
+                            api_base=config.scoring_base_url,
+                            tokenizer=tokenizer,
+                            max_size=config.distortion_max_size,
+                            keep_first=config.distortion_keep_first,
+                            lambda_len=config.distortion_lambda,
+                        )
+                    else:
+                        reward = coverage_reward(content, traj)
 
                     sampled_tokens_G_T.append(sampled_tokens)
                     logprobs_G_T.append(sampled_logprobs)

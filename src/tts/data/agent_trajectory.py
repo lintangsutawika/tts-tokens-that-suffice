@@ -185,6 +185,40 @@ class AgentTrajectory:
         )
 
 
+def steps_to_messages(
+    steps: list[TrajectoryStep],
+    task: str,
+    system_prompt: str = SYSTEM_PROMPT,
+) -> list[dict[str, Any]]:
+    """
+    Convert TrajectoryStep list to a list[dict] message format compatible
+    with tts.reward.utils (which expects standard OpenAI-style message dicts).
+    """
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": task},
+    ]
+    for step in steps:
+        if step.role == "assistant":
+            msg: dict[str, Any] = {"role": "assistant", "content": step.content}
+            if step.tool_calls:
+                msg["tool_calls"] = [
+                    {
+                        "function": {
+                            "name": tc.name,
+                            "arguments": tc.arguments,
+                        }
+                    }
+                    for tc in step.tool_calls
+                ]
+            messages.append(msg)
+        elif step.role == "tool":
+            messages.append({"role": "tool", "content": step.content})
+        else:
+            messages.append({"role": step.role, "content": step.content})
+    return messages
+
+
 def load_trajectories(path: str | Path) -> list[AgentTrajectory]:
     """Load AgentTrajectory records from a JSONL file."""
     trajectories = []

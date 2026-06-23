@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "tts-tokens-that-suffice"
 version = "0.1.0"
 requires-python = ">=3.11, <3.14"
-dependencies = []  # tinker-cookbook installed from submodule by setup.sh
+dependencies = [
+    "vllm==0.19.0",
+    "tinker-cookbook>=0.4.2",
+    "litellm>=1.89.1",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -18,7 +22,6 @@ dev = [
 where = ["src"]
 
 [tool.uv]
-environments = ["sys_platform == 'linux'"]
-override-dependencies = [
-    "tinker==0.22.2",  # newer tinker adds vllm-router which requires glibc 2.35 (system has 2.34)
-]
+concurrent-downloads = 10
+concurrent-builds = 4
+concurrent-installs = 4
