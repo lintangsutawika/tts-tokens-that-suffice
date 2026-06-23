@@ -27,7 +27,7 @@ from swebench.harness.constants import (
 from swesmith.harness.grading import get_eval_tests_report, get_resolution_status
 from minisweagent.environments import Environment, get_environment
 
-from era.utils.patch import apply_patch
+from tts.utils.patch import apply_patch
 
 
 class MiniSWEEvaluationResult(TypedDict):
