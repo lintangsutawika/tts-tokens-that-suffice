@@ -103,10 +103,10 @@ class Config:
     distortion_lambda: float = 0.0
     # URL of the vLLM scoring server (used only when reward_fn="distortion").
     scoring_base_url: str = "http://localhost:8000/v1"
-    # Number of messages to keep verbatim from the start of the trajectory in z-context.
+    # Target message budget for the z-context. Tail = max_size//2 - keep_first messages.
+    distortion_max_size: int = 20
+    # Messages to keep verbatim from the start of the trajectory in z-context.
     distortion_keep_first: int = 4
-    # Number of recent (assistant, tool) turns to keep verbatim in z-context.
-    distortion_keep: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +305,8 @@ def main(config: Config) -> None:
                             model=config.model_name,
                             api_base=config.scoring_base_url,
                             tokenizer=tokenizer,
+                            max_size=config.distortion_max_size,
                             keep_first=config.distortion_keep_first,
-                            keep=config.distortion_keep,
                             lambda_len=config.distortion_lambda,
                         )
                     else:
