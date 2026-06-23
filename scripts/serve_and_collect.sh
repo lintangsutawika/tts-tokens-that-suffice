@@ -55,8 +55,7 @@ done
 echo "vLLM server ready."
 
 SLICE_ARG=${SLICE:+--slice ${SLICE}}
-
-BASE_URL=http://0.0.0.0:${PORT}/v1 \
+export MSWEA_COST_TRACKING='ignore_errors'
 uv run -m tts.collect_trajectories \
     ${SLICE_ARG} \
     --dataset ${DATASET} \
@@ -64,6 +63,7 @@ uv run -m tts.collect_trajectories \
     --workers ${WORKERS} \
     --model ${MODEL} \
     -c swebench.yaml \
+    -c model.model_kwargs.api_base=http://0.0.0.0:${PORT}/v1 \
     -c model.model_kwargs.temperature=1.0 \
     -c model.model_kwargs.top_k=20
 
