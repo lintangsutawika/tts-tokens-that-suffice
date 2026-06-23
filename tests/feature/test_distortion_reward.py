@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 
 import litellm
+from transformers import AutoTokenizer
 
 # ---------------------------------------------------------------------------
 # Path setup — allows running as a script without installing the package
@@ -42,9 +43,14 @@ import litellm
 _REPO_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
-from tts.utils.logprob import inspect_score_completion, score_completion
-from tts.utils.summary_utils import format_continuation, parse_messages, render_template
+from tts.summarization.utils import parse_messages, render_template, format_continuation
 from tts.utils.trajectory import chunk_trajectory_by_assistant
+from tts.reward.utils import (
+    build_x_scoring_messages,
+    build_z_scoring_messages,
+    compute_distortion,
+    last_n_turns,
+)
 
 # ---------------------------------------------------------------------------
 # Inline DEFAULT_INSTANCE_TEMPLATE from summarization_agent.py
@@ -177,100 +183,50 @@ def generate_summary(
 # Step 4: distortion reward scoring
 # ---------------------------------------------------------------------------
 
-def _build_x_scoring_messages(partial_messages: list[dict]) -> list[dict]:
-    """x-context: the full original message history."""
-    return partial_messages
-
-
-def _build_z_scoring_messages(
-    summary: str,
+def _run_self_test(
+    base_url: str,
+    model: str,
     partial_messages: list[dict],
-    keep: int = 3,
-) -> list[dict]:
-    """
-    z-context: the compressed trajectory that SummarizationAgent produces.
+    continuation_messages: list[dict],
+    tokenizer,
+) -> dict:
+    """Score with x == z (no summary). KL should be ≈ 0."""
+    from tts.utils.logprob import score_completion
+    from tts.summarization.utils import format_continuation
 
-    Structure mirrors compacting N messages to:
-      [system, user(task), user(summary), *partial[-keep:]]
+    y_text = format_continuation(partial_messages, continuation_messages, tokenizer)
+    kl_per_token = score_completion(
+        partial_messages, partial_messages, y_text, model, base_url, tokenizer
+    )
+    if kl_per_token is None:
+        return {"error": "score_completion failed", "fidelity": None}
+    n = len(kl_per_token)
+    if n == 0:
+        return {"error": "No completion tokens scored", "fidelity": None}
+    distortion = sum(kl_per_token) / n
+    return {"distortion": distortion, "fidelity": -distortion, "n_tokens": n}
 
-    The last `keep` messages are kept verbatim so the agent still sees
-    the most recent tool outputs and actions.
-    """
-    system_msg = next((m for m in partial_messages if m.get("role") == "system"), None)
-    user_msg = next((m for m in partial_messages if m.get("role") == "user"), None)
-    summary_msg = {"role": "user", "content": f"<summary>\n{summary}\n</summary>"}
-    recent = partial_messages[-keep:] if keep > 0 else []
-    return [m for m in [system_msg, user_msg, summary_msg] if m] + recent
 
-
-def compute_distortion_reward(
+def _run_distortion_reward(
     base_url: str,
     model: str,
     partial_messages: list[dict],
     summary: str,
     continuation_messages: list[dict],
-    keep: int = 3,
-    inspect: bool = False,
+    tokenizer,
+    max_size: int = 20,
+    keep_first: int = 4,
 ) -> dict:
-    """
-    Compute the KL-distortion reward components.
-
-    distortion(x, z) = (1/|y|) Σ_t [log p(y_t | y<t, x) − log p(y_t | y<t, z)]
-
-    x = full original partial_messages
-    z = compressed trajectory: [system, user(task), summary, *partial[-keep:]]
-
-    Returns a dict with fidelity, per-context mean logprobs, and token count.
-    """
-    y_text = format_continuation(continuation_messages)
-    x_messages = _build_x_scoring_messages(partial_messages)
-    z_messages = _build_z_scoring_messages(summary, partial_messages, keep=keep)
-    # z_messages = x_messages.copy()
-
-    if inspect:
-        print("\n  === inspect x-context ===")
-        inspect_score_completion(x_messages, y_text, model, base_url)
-        print("\n  === inspect z-context ===")
-        inspect_score_completion(z_messages, y_text, model, base_url)
-
-    print(f"    Scoring y ({len(y_text)} chars) against x-context")
-    lp_x = score_completion(x_messages, y_text, model, base_url)
-
-    print(f"    Scoring y against z-context (summary {len(summary)} chars)")
-    lp_z = score_completion(z_messages, y_text, model, base_url)
-
-    if lp_x is None or lp_z is None:
-        return {
-            "error": "Backend does not support /v1/completions with echo=True.",
-            "fidelity": None,
-        }
-
-    # Warn if tokenization differed at the context boundary — KL would be
-    # comparing log-probs for different tokens across x and z.
-    if len(lp_x) != len(lp_z):
-        print(
-            f"    WARNING: token count mismatch lp_x={len(lp_x)} lp_z={len(lp_z)}. "
-            "Context boundary tokenization differs — KL estimate may be inaccurate."
-        )
-
-    n = min(len(lp_x), len(lp_z))
-    if n == 0:
-        return {"error": "No completion tokens scored", "fidelity": None}
-
-    # distortion: how much worse z is at predicting y than x (should be >= 0)
-    distortion = sum(lp_x[t] - lp_z[t] for t in range(n)) / n
-    fidelity = -distortion
-    return {
-        "fidelity": fidelity,
-        "distortion": distortion,
-        "n_tokens": n,
-        "n_x_messages": len(x_messages),
-        "n_z_messages": len(z_messages),
-        "lp_x_mean": sum(lp_x[:n]) / n,
-        "lp_z_mean": sum(lp_z[:n]) / n,
-        "lp_x_total": sum(lp_x[:n]),
-        "lp_z_total": sum(lp_z[:n]),
-    }
+    return compute_distortion(
+        partial_messages=partial_messages,
+        summary=summary,
+        continuation_messages=continuation_messages,
+        model=model,
+        api_base=base_url,
+        tokenizer=tokenizer,
+        max_size=max_size,
+        keep_first=keep_first,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -280,25 +236,38 @@ def compute_distortion_reward(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--base-url", default="http://localhost:8000", help="vLLM server base URL")
-    p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507", help="Model name")
+    p.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507", help="Model name passed to the API")
+    p.add_argument("--tokenizer", default=None, metavar="PATH",
+                   help="HuggingFace tokenizer path/name (defaults to --model with litellm_proxy/ stripped)")
     p.add_argument("--cut-index", type=int, default=15, help="Message slice point (default: 15)")
     p.add_argument("--max-tokens", type=int, default=512, help="Max summary tokens")
     p.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     p.add_argument("--fixture", default=str(FIXTURE), help="Path to trajectory JSON file")
     p.add_argument("--save", default=None, metavar="PATH",
                    help="Save generated summaries (and reward results) to a JSONL file")
-    p.add_argument("--inspect", action="store_true",
-                   help="Print raw token/logprob structure to verify KL alignment")
     p.add_argument("--summary-file", default=None, metavar="PATH",
                    help="Load pre-computed summary from a .txt file; skips generation step")
-    p.add_argument("--keep", type=int, default=3,
-                   help="Verbatim recent messages to retain in z-context (default: 3)")
+    p.add_argument("--max-size", type=int, default=20,
+                   help="Target message budget for z-context; tail = max_size//2 - keep_first msgs (default: 20)")
+    p.add_argument("--keep-first", type=int, default=4,
+                   help="Messages to keep verbatim from the start in z-context (default: 4)")
+    p.add_argument("--save-z", default=None, metavar="PATH",
+                   help="Save the full z-context message list to a JSON file")
+    p.add_argument("--save-continuation", default=None, metavar="PATH",
+                   help="Save the continuation message list to a JSON file")
+    p.add_argument("--self-test", action="store_true",
+                   help="Use partial as both x and z (no summary); KL should be ≈0")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     base_url: str = args.base_url.rstrip("/")
+
+    # --- Load tokenizer ---
+    tokenizer_name = args.tokenizer or args.model.removeprefix("litellm_proxy/")
+    print(f"\n=== Loading tokenizer: {tokenizer_name} ===")
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=True)
 
     # --- Load fixture ---
     fixture_path = Path(args.fixture)
@@ -313,11 +282,46 @@ def main() -> None:
     print()
     partial, continuation = cut_trajectory(messages, args.cut_index)
 
+    if args.self_test:
+        # -----------------------------------------------------------------------
+        # Self-test: x == z (no summary). KL should be ≈ 0.
+        # -----------------------------------------------------------------------
+        print()
+        print("[self-test] Using partial as both x and z — skipping summary generation.")
+        print(f"            x messages: {len(partial)}  z messages: {len(partial)}")
+        self_test_result = _run_self_test(
+            base_url=base_url,
+            model=args.model,
+            partial_messages=partial,
+            continuation_messages=continuation,
+            tokenizer=tokenizer,
+        )
+        print()
+        print("=== Self-Test Results (expect distortion ≈ 0) ===")
+        if "error" in self_test_result:
+            print(f"    ERROR: {self_test_result['error']}")
+        else:
+            print(f"    distortion D_KL(p(y|x)‖p(y|x)): {self_test_result['distortion']:.6f} nats/token")
+            print(f"    fidelity (−distortion)           : {self_test_result['fidelity']:.6f}")
+            print(f"    n_tokens (|y|)                   : {self_test_result['n_tokens']}")
+            if self_test_result["distortion"] < 0.01:
+                print("    ✓ PASS: distortion is effectively 0")
+            else:
+                print("    ✗ FAIL: distortion should be 0 when x == z")
+        return
+
     # -----------------------------------------------------------------------
     # Step 2: Render summary prompt
+    # Keep first keep_first messages and last keep tail turns verbatim; summarize middle.
     # -----------------------------------------------------------------------
     print()
-    chat_messages = build_summary_prompt(partial)
+    tail_messages = args.max_size // 2 - args.keep_first
+    keep_turns = tail_messages // 2
+    last_turns = last_n_turns(partial, keep_turns)
+    middle = partial[args.keep_first : len(partial) - len(last_turns)] if last_turns else partial[args.keep_first:]
+    print(f"    max_size={args.max_size}  keep_first={args.keep_first}  tail={tail_messages} msgs ({keep_turns} turns)")
+    print(f"    Summarizing {len(middle)} middle messages (skipping first {args.keep_first} + last {len(last_turns)} verbatim)")
+    chat_messages = build_summary_prompt(middle)
     show_rendered_prompt(chat_messages)
 
     # -----------------------------------------------------------------------
@@ -352,14 +356,15 @@ def main() -> None:
     # -----------------------------------------------------------------------
     print()
     print("[4] Computing distortion reward ...")
-    result = compute_distortion_reward(
+    result = _run_distortion_reward(
         base_url=base_url,
         model=args.model,
         partial_messages=partial,
         summary=summary,
         continuation_messages=continuation,
-        keep=args.keep,
-        inspect=args.inspect,
+        tokenizer=tokenizer,
+        max_size=args.max_size,
+        keep_first=args.keep_first,
     )
 
     print()
@@ -368,16 +373,32 @@ def main() -> None:
         print(f"    ERROR: {result['error']}")
     else:
         print(f"    x messages (before)              : {result['n_x_messages']}")
-        print(f"    z messages (after)               : {result['n_z_messages']}  (compression {result['n_x_messages']}→{result['n_z_messages']})")
+        print(f"    z messages (after)               : {result['n_z_messages']}  (compression {result['n_x_messages']}→{result['n_z_messages']}, max_size={args.max_size})")
         print(f"    distortion D_KL(p(y|x)‖p(y|z)): {result['distortion']:.4f} nats/token")
         print(f"    fidelity (−distortion)           : {result['fidelity']:.4f}")
         print(f"    n_tokens (|y|)                   : {result['n_tokens']}")
-        print(f"    mean log p(y|x)  (teacher)       : {result['lp_x_mean']:.4f}")
-        print(f"    mean log p(y|z)  (student)       : {result['lp_z_mean']:.4f}")
         if result["distortion"] <= 0.5:
             print("    ✓ Summary preserves most predictive information (low distortion)")
         else:
             print("    ✗ Summary loses significant predictive information (high distortion)")
+
+    # -----------------------------------------------------------------------
+    # Optionally save z messages
+    # -----------------------------------------------------------------------
+    if args.save_z:
+        z_messages = build_z_scoring_messages(summary, partial, max_size=args.max_size, keep_first=args.keep_first)
+        save_z_path = Path(args.save_z)
+        save_z_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_z_path, "w") as f:
+            json.dump(z_messages, f, indent=2)
+        print(f"\n    z messages ({len(z_messages)}) saved to {save_z_path}")
+
+    if args.save_continuation:
+        save_cont_path = Path(args.save_continuation)
+        save_cont_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(save_cont_path, "w") as f:
+            json.dump(continuation, f, indent=2)
+        print(f"\n    continuation ({len(continuation)} messages) saved to {save_cont_path}")
 
     # -----------------------------------------------------------------------
     # Optionally save
