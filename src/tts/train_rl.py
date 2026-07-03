@@ -33,8 +33,8 @@ Two reward functions are available (set via Config.reward_fn):
     −H(p(y|x)) so advantage signals reflect only relative group quality.
 
     Requires the serving backend to support returning logprobs for prompt
-    tokens (SamplingParams(prompt_logprobs=1)).  Falls back to 0.0 and emits
-    a warning if the backend does not support this.
+    tokens (SamplingParams(prompt_logprobs=1)).  Samples whose scoring call
+    fails are dropped from their group (never given a numeric fallback reward).
 
 Variable naming convention (mirrors rl_loop.py):
     _P  Problem dimension  (different trajectories in a batch)
@@ -52,9 +52,13 @@ Or via the test script:
 
 from __future__ import annotations
 
+import json
 import logging
+import math
+import os
+import random
 import time
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 
 import chz
 import tinker
@@ -70,13 +74,18 @@ from tinker_cookbook.utils.git_rev import recipe_user_metadata
 
 from tts.data.agent_trajectory import (
     AgentTrajectory,
+    AGENT_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     TrajectoryStep,
     format_trajectory_text,
+    load_collect_trajectories,
     load_trajectories,
     steps_to_messages,
 )
-from tts.reward.reverse_kl_reward import distortion_reward
+from minisweagent.models.utils.actions_toolcall import BASH_TOOL
+
+from tts.reward.reverse_kl_reward import distortion_reward, distortion_reward_z
+from tts.reward.utils import XContext, build_z_scoring_messages, precompute_x_context
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
@@ -86,7 +95,7 @@ logging.getLogger("httpx").setLevel(logging.WARN)
 class Config:
     base_url: str | None = None
     log_path: str = "/tmp/tinker-agent-summarization-rl"
-    model_name: str = "Qwen/Qwen3-4B-Instruct-2507"
+    model_name: str = "Qwen/Qwen3.5-9B"
     dataset_path: str = ""
     batch_size: int = 32       # trajectories per gradient step
     group_size: int = 8        # candidate summaries sampled per trajectory
@@ -101,12 +110,55 @@ class Config:
     # Length-penalty coefficient λ for the distortion reward.
     # Positive values encourage shorter summaries.
     distortion_lambda: float = 0.0
-    # URL of the vLLM scoring server (used only when reward_fn="distortion").
+    # URL and model name of the vLLM scoring server (used only when reward_fn="distortion").
     scoring_base_url: str = "http://localhost:8000/v1"
+    scoring_model: str = "Qwen/Qwen3.5-27B"
     # Target message budget for the z-context. Tail = max_size//2 - keep_first messages.
     distortion_max_size: int = 20
     # Messages to keep verbatim from the start of the trajectory in z-context.
     distortion_keep_first: int = 4
+    # Min steps in prefix / suffix when sampling a random split from full trajectories.
+    min_split_prefix: int = 3
+    min_split_suffix: int = 3
+    # Renderer name override. Defaults to the model's recommended renderer.
+    # Use "qwen3_instruct" to disable thinking for Qwen3/Qwen3.5 instruct models.
+    renderer_name: str | None = None
+    # W&B logging (disabled by default).
+    wandb_project: str | None = None
+    wandb_name: str | None = None
+    # Sampling temperature for rollout generation.
+    sampling_temperature: float = 1.0
+    # Minimum within-group reward spread to use a group for training.
+    # Groups below this threshold are skipped as low-signal noise.
+    # Scaled for the realized-token distortion reward (typical spread ~0.2).
+    min_reward_spread: float = 0.1
+    # Snap rewards to this grid before computing advantages; differences smaller
+    # than this value are treated as ties (advantage 0). Set to 0 to disable.
+    reward_snap: float = 0.05
+    # GRPO advantage normalization: divide centered rewards by (std + eps).
+    # When False, advantages are raw mean-centered rewards.
+    normalize_advantage: bool = False
+    # Epsilon floor added to the group std before dividing (prevents blow-up on
+    # low-variance groups). Only used when normalize_advantage is True.
+    advantage_eps: float = 0.1
+    # Save sampled summaries and their rewards to log_path/summaries.jsonl.
+    save_summaries: bool = True
+    # --- Held-out eval (data-controlled learning signal) ---
+    # Trajectories reserved from the END of the dataset for a fixed eval set that
+    # is never trained on. Their splits are pinned once (eval_seed), so eval/reward
+    # moves only when the policy moves. Set 0 to disable eval.
+    eval_size: int = 16
+    # Run the held-out eval every N batches (also at batch 0 for a baseline).
+    eval_every: int = 10
+    # Decoding temperature for eval generation. 0.0 = greedy/deterministic so eval
+    # reward reflects weight changes, not sampling noise.
+    eval_temperature: float = 0.0
+    # Seed for pinning eval-set splits (fixed across the whole run).
+    eval_seed: int = 12345
+    # Diagnostic/overfit mode: eval on the SAME trajectories used for training
+    # (fixed splits), instead of holding them out. Lets the eval curve answer
+    # "can the setup fit the training set at all?" Use with a tiny dataset.
+    eval_on_train: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -157,21 +209,77 @@ def main(config: Config) -> None:
 
     ml_logger = ml_log.setup_logging(
         log_dir=config.log_path,
-        wandb_project=None,
-        wandb_name=None,
+        wandb_project=config.wandb_project,
+        wandb_name=config.wandb_name,
         config=config,
         do_configure_logging_module=True,
     )
 
     tokenizer = get_tokenizer(config.model_name)
-    renderer_name = model_info.get_recommended_renderer_name(config.model_name)
+    renderer_name = config.renderer_name or model_info.get_recommended_renderer_name(config.model_name)
     renderer = renderers.get_renderer(renderer_name, tokenizer)
     logger.info("Using renderer: %s", renderer_name)
     logger.info("Using reward_fn: %s", config.reward_fn)
 
     logger.info("Loading trajectories from %s", config.dataset_path)
-    trajectories = load_trajectories(config.dataset_path)
-    logger.info("Loaded %d trajectories", len(trajectories))
+    # Try collect_trajectories format first (full unsplit); fall back to pre-split format.
+    try:
+        trajectories = load_collect_trajectories(config.dataset_path)
+        logger.info("Loaded %d full trajectories (will split per-batch)", len(trajectories))
+        split_at_train_time = True
+    except (KeyError, TypeError):
+        trajectories = load_trajectories(config.dataset_path)
+        logger.info("Loaded %d pre-split trajectories", len(trajectories))
+        split_at_train_time = False
+
+    # Reserve a fixed held-out eval set from the END of the dataset (never trained
+    # on). Splits are pinned with eval_seed and x-contexts precomputed once, so the
+    # eval reward isolates policy improvement from the per-batch data-ordering noise
+    # that dominates train reward/mean.
+    eval_set: list[tuple[AgentTrajectory, XContext | None]] = []
+    if config.eval_size > 0 and config.eval_every > 0:
+        eval_rng = random.Random(config.eval_seed)
+        if config.eval_on_train:
+            # Overfit/diagnostic: eval on the same trajectories we train on
+            # (fixed splits), kept in the training pool.
+            eval_raw = trajectories[: config.eval_size]
+        else:
+            if len(trajectories) <= config.eval_size:
+                raise ValueError(
+                    f"eval_size={config.eval_size} >= dataset size {len(trajectories)}"
+                )
+            eval_raw = trajectories[-config.eval_size:]
+            trajectories = trajectories[: -config.eval_size]
+        eval_trajs = [
+            t.sample_split(
+                eval_rng,
+                min_prefix=config.min_split_prefix,
+                min_suffix=config.min_split_suffix,
+            )
+            if split_at_train_time
+            else t
+            for t in eval_raw
+        ]
+
+        def _precompute_eval_x(et):
+            if config.reward_fn != "distortion":
+                return (et, None)
+            sys_prompt = et.agent_system_prompt or AGENT_SYSTEM_PROMPT
+            partial = steps_to_messages(et.steps, et.task, system_prompt=sys_prompt)
+            cont = steps_to_messages(et.continuation, et.task, system_prompt=sys_prompt)[2:]
+            x_ctx = precompute_x_context(
+                partial_messages=partial, continuation_messages=cont,
+                model=config.scoring_model, api_base=config.scoring_base_url,
+                tokenizer=tokenizer, tools=[BASH_TOOL],
+            )
+            return (et, x_ctx)
+
+        with ThreadPoolExecutor(max_workers=len(eval_trajs)) as ex:
+            eval_set = list(ex.map(_precompute_eval_x, eval_trajs))
+        logger.info(
+            "Reserved %d held-out eval trajectories; %d remain for training",
+            len(eval_set), len(trajectories),
+        )
 
     if len(trajectories) < config.batch_size:
         raise ValueError(
@@ -204,13 +312,87 @@ def main(config: Config) -> None:
 
     sampling_params = types.SamplingParams(
         max_tokens=config.max_tokens,
+        temperature=config.sampling_temperature,
         stop=renderer.get_stop_sequences(),
     )
     adam_params = types.AdamParams(
-        learning_rate=config.learning_rate, beta1=0.9, beta2=0.95, eps=1e-8
+        learning_rate=config.learning_rate, beta1=0.9, beta2=0.95, eps=1e-8,
+        grad_clip_norm=1.0,
     )
 
-    import random
+    eval_sampling_params = types.SamplingParams(
+        max_tokens=config.max_tokens,
+        temperature=config.eval_temperature,
+        stop=renderer.get_stop_sequences(),
+    )
+
+    def run_eval(sampling_client) -> dict[str, float]:
+        """Score the frozen held-out eval set with the current weights (no gradient).
+
+        Reuses the existing training client's sampling snapshot, so it needs no
+        second LoRA adapter (the FSDP backend allows only one). Greedy decoding
+        makes the result depend only on the weights, isolating policy improvement.
+
+        All generations are submitted up front (sample() returns a future) and the
+        per-trajectory scoring runs in a thread pool, so the eval set is processed
+        concurrently rather than one trajectory at a time.
+        """
+        # Submit every generation first; sample() is non-blocking and returns a future.
+        sample_futures = []
+        for et, _ in eval_set:
+            convo = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": format_trajectory_text(et.steps)},
+            ]
+            sample_futures.append(
+                sampling_client.sample(
+                    prompt=renderer.build_generation_prompt(convo),
+                    num_samples=1,
+                    sampling_params=eval_sampling_params,
+                )
+            )
+
+        def _eval_one(args) -> float | None:
+            (et, x_ctx), future = args
+            try:
+                result = future.result()
+            except Exception as exc:
+                logger.warning("Eval sampling failed for %s: %s", et.trajectory_id, exc)
+                return None
+            parsed_message, _ = renderer.parse_response(result.sequences[0].tokens)
+            summary = renderers.get_text_content(parsed_message)
+            if config.reward_fn == "distortion":
+                if x_ctx is None:
+                    return None
+                partial = steps_to_messages(
+                    et.steps, et.task,
+                    system_prompt=et.agent_system_prompt or AGENT_SYSTEM_PROMPT,
+                )
+                r = distortion_reward_z(
+                    x_ctx=x_ctx, summary=summary, partial_messages=partial,
+                    model=config.scoring_model, api_base=config.scoring_base_url,
+                    tokenizer=tokenizer, max_size=config.distortion_max_size,
+                    keep_first=config.distortion_keep_first,
+                    lambda_len=config.distortion_lambda, tools=[BASH_TOOL],
+                )
+            else:
+                r = coverage_reward(summary, et)
+            return r if r is not None and math.isfinite(r) else None
+
+        rewards: list[float] = []
+        with ThreadPoolExecutor(max_workers=len(eval_set)) as ex:
+            for r in ex.map(_eval_one, zip(eval_set, sample_futures)):
+                if r is not None:
+                    rewards.append(r)
+        if not rewards:
+            return {}
+        return {
+            "eval/reward_mean": sum(rewards) / len(rewards),
+            "eval/reward_min": min(rewards),
+            "eval/reward_max": max(rewards),
+            "eval/n": float(len(rewards)),
+        }
+
     global_batch_idx = start_batch
     for epoch in range(config.num_epochs):
         epoch_rng = random.Random(epoch)
@@ -218,6 +400,7 @@ def main(config: Config) -> None:
         epoch_rng.shuffle(shuffled)
 
         for batch_in_epoch in range(n_batches_per_epoch):
+            batch_rng = random.Random(global_batch_idx)
             if global_batch_idx < start_batch:
                 global_batch_idx += 1
                 continue
@@ -245,9 +428,20 @@ def main(config: Config) -> None:
                 )
 
             batch_start = batch_in_epoch * config.batch_size
-            batch_trajectories: list[AgentTrajectory] = shuffled[
+            raw_batch: list[AgentTrajectory] = shuffled[
                 batch_start : batch_start + config.batch_size
             ]
+            if split_at_train_time:
+                batch_trajectories = [
+                    t.sample_split(
+                        batch_rng,
+                        min_prefix=config.min_split_prefix,
+                        min_suffix=config.min_split_suffix,
+                    )
+                    for t in raw_batch
+                ]
+            else:
+                batch_trajectories = raw_batch
 
             # Snapshot weights so sampling is consistent within the batch.
             # For the distortion reward this same snapshot is used for the
@@ -255,16 +449,31 @@ def main(config: Config) -> None:
             # same frozen checkpoint throughout the reward computation.
             sampling_client = training_client.save_weights_and_get_sampling_client()
 
+            # --- Held-out eval (data-controlled learning signal) ---
+            # Uses this batch's pre-gradient-step snapshot = weights after
+            # global_batch_idx updates. Runs at batch 0 (baseline) and every
+            # eval_every batches thereafter.
+            if eval_set and global_batch_idx % config.eval_every == 0:
+                eval_metrics = run_eval(sampling_client)
+                metrics.update(eval_metrics)
+                if eval_metrics:
+                    logger.info(
+                        "Batch %d eval/reward_mean=%.4f (n=%d)",
+                        global_batch_idx, eval_metrics["eval/reward_mean"],
+                        int(eval_metrics["eval/n"]),
+                    )
+
             # --- Rollout phase ---
             datums_D: list[types.Datum] = []
             rewards_P: list[float] = []
             futures_P: list[Future[types.SampleResponse]] = []
             prompts_P: list[types.ModelInput] = []
+            convos_P: list[list[dict]] = []
 
             for traj in batch_trajectories:
                 convo = [
                     {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": format_trajectory_text(traj.steps, traj.task)},
+                    {"role": "user", "content": format_trajectory_text(traj.steps)},
                 ]
                 model_input = renderer.build_generation_prompt(convo)
                 future = sampling_client.sample(
@@ -274,60 +483,199 @@ def main(config: Config) -> None:
                 )
                 futures_P.append(future)
                 prompts_P.append(model_input)
+                convos_P.append(convo)
 
-            # --- Reward + advantage computation ---
-            for future, prompt, traj in tqdm(
-                zip(futures_P, prompts_P, batch_trajectories),
-                total=len(futures_P),
-                desc=f"Scoring batch {global_batch_idx}",
+            # --- Reward computation ---
+            # For distortion reward: precompute x-context logprobs once per trajectory
+            # (2 API calls), then score all group_size summaries with only z calls (2 each).
+            # This reduces API calls from 4*group_size to 2 + 2*group_size per trajectory.
+            #
+            # Step 1: resolve sampling futures and collect work items.
+            WorkItem = tuple  # (traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx)
+            work_items: list[WorkItem] = []
+
+            if config.reward_fn == "distortion":
+                def _precompute_x_for_traj(args):
+                    traj_idx, traj = args
+                    sys_prompt = traj.agent_system_prompt or AGENT_SYSTEM_PROMPT
+                    partial_messages = steps_to_messages(traj.steps, traj.task, system_prompt=sys_prompt)
+                    continuation_messages = steps_to_messages(traj.continuation, traj.task, system_prompt=sys_prompt)[2:]
+                    return traj_idx, precompute_x_context(
+                        partial_messages=partial_messages,
+                        continuation_messages=continuation_messages,
+                        model=config.scoring_model,
+                        api_base=config.scoring_base_url,
+                        tokenizer=tokenizer,
+                        tools=[BASH_TOOL],
+                    )
+
+                x_ctx_map: dict[int, XContext | None] = {}
+                with ThreadPoolExecutor(max_workers=len(batch_trajectories)) as ex:
+                    x_futures = {
+                        ex.submit(_precompute_x_for_traj, (i, t)): i
+                        for i, t in enumerate(batch_trajectories)
+                    }
+                    for xf in tqdm(
+                        as_completed(x_futures),
+                        total=len(x_futures),
+                        desc=f"Precompute x batch {global_batch_idx}",
+                    ):
+                        traj_idx, x_ctx = xf.result()
+                        x_ctx_map[traj_idx] = x_ctx
+            else:
+                x_ctx_map = {}
+
+            for traj_idx, (future, prompt, traj, convo) in enumerate(
+                zip(futures_P, prompts_P, batch_trajectories, convos_P)
             ):
-                sample_result = future.result()
-
-                rewards_G: list[float] = []
-                sampled_tokens_G_T: list[list[int]] = []
-                logprobs_G_T: list[list[float]] = []
-
-                for sequence in sample_result.sequences:
-                    sampled_tokens = sequence.tokens
-                    sampled_logprobs = sequence.logprobs
-                    assert sampled_logprobs is not None
-
-                    parsed_message, _ = renderer.parse_response(sampled_tokens)
+                # The sampling server can 400 with "Out of range float ... nan" when
+                # the policy emits a non-finite logit for a given prompt. Skip that
+                # trajectory's samples instead of crashing the whole run; the batch
+                # proceeds with the trajectories that did sample cleanly.
+                try:
+                    sample_result = future.result()
+                except Exception as exc:
+                    logger.warning(
+                        "Batch %d traj %d: sampling failed (%s), skipping trajectory",
+                        global_batch_idx, traj_idx, exc,
+                    )
+                    continue
+                x_ctx = x_ctx_map.get(traj_idx)
+                for seq_idx, sequence in enumerate(sample_result.sequences):
+                    assert sequence.logprobs is not None
+                    parsed_message, _ = renderer.parse_response(sequence.tokens)
                     content = renderers.get_text_content(parsed_message)
+                    work_items.append(
+                        (traj_idx, seq_idx, traj, convo, prompt, sequence.tokens, sequence.logprobs, content, x_ctx)
+                    )
 
-                    if config.reward_fn == "distortion":
-                        partial_messages = steps_to_messages(traj.steps, traj.task)
-                        continuation_messages = steps_to_messages(traj.continuation, traj.task)[2:]
-                        reward = distortion_reward(
-                            partial_messages=partial_messages,
+            # Step 2: score all summaries in parallel (z-only for distortion).
+            def _score_item(item: WorkItem) -> tuple[int, int, float | None, list[int], list[float], list[dict]]:
+                traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx = item
+                if config.reward_fn == "distortion":
+                    partial_messages = steps_to_messages(traj.steps, traj.task, system_prompt=traj.agent_system_prompt or AGENT_SYSTEM_PROMPT)
+                    if x_ctx is not None:
+                        reward = distortion_reward_z(
+                            x_ctx=x_ctx,
                             summary=content,
-                            continuation_messages=continuation_messages,
-                            model=config.model_name,
+                            partial_messages=partial_messages,
+                            model=config.scoring_model,
                             api_base=config.scoring_base_url,
                             tokenizer=tokenizer,
                             max_size=config.distortion_max_size,
                             keep_first=config.distortion_keep_first,
                             lambda_len=config.distortion_lambda,
+                            tools=[BASH_TOOL],
                         )
                     else:
-                        reward = coverage_reward(content, traj)
+                        reward = None
+                else:
+                    reward = coverage_reward(content, traj)
+                return traj_idx, seq_idx, reward, tokens, logprobs, convo
 
-                    sampled_tokens_G_T.append(sampled_tokens)
-                    logprobs_G_T.append(sampled_logprobs)
-                    rewards_G.append(reward)
+            n_workers = config.group_size * len(batch_trajectories)
+            scored: dict[int, list[tuple[int, float | None, list[int], list[float], list[dict]]]] = {}
+            with ThreadPoolExecutor(max_workers=n_workers) as ex:
+                reward_futures = {ex.submit(_score_item, item): item for item in work_items}
+                for rf in tqdm(
+                    as_completed(reward_futures),
+                    total=len(reward_futures),
+                    desc=f"Scoring batch {global_batch_idx}",
+                ):
+                    traj_idx, seq_idx, reward, tokens, logprobs, convo = rf.result()
+                    scored.setdefault(traj_idx, []).append((seq_idx, reward, tokens, logprobs, convo))
 
+            # --- Save sampled summaries ---
+            if config.save_summaries:
+                summaries_path = os.path.join(config.log_path, "summaries.jsonl")
+                with open(summaries_path, "a") as f:
+                    for item in work_items:
+                        traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx = item
+                        group_scores = scored.get(traj_idx, [])
+                        reward = next((r for si, r, _, _, _ in group_scores if si == seq_idx), None)
+                        partial_messages = steps_to_messages(
+                            traj.steps, traj.task,
+                            system_prompt=traj.agent_system_prompt or AGENT_SYSTEM_PROMPT,
+                        )
+                        z_messages = build_z_scoring_messages(
+                            content, partial_messages,
+                            max_size=config.distortion_max_size,
+                            keep_first=config.distortion_keep_first,
+                        )
+                        f.write(json.dumps({
+                            "batch": global_batch_idx,
+                            "traj_idx": traj_idx,
+                            "seq_idx": seq_idx,
+                            "trajectory_id": traj.trajectory_id,
+                            "n_prefix_steps": len(traj.steps),
+                            "n_continuation_steps": len(traj.continuation),
+                            "reward": reward,
+                            "summary": content,
+                            "summarizer_input": convo,
+                            "deliberator_input": z_messages,
+                        }) + "\n")
+
+            # --- Advantage computation and datum assembly ---
+            for traj_idx, (prompt, traj) in enumerate(
+                zip(prompts_P, batch_trajectories)
+            ):
+                group = sorted(scored.get(traj_idx, []), key=lambda x: x[0])
+                # Drop samples whose reward failed to compute (None/NaN/inf).
+                # Fidelity is typically negative, so mapping failures to a
+                # numeric 0.0 would put them at the top of the group and
+                # reinforce whatever made the scorer fail.
+                n_failed = sum(
+                    1 for _, r, _, _, _ in group
+                    if r is None or not math.isfinite(r)
+                )
+                if n_failed:
+                    logger.warning(
+                        "Batch %d traj %d: dropping %d/%d samples with failed reward",
+                        global_batch_idx, traj_idx, n_failed, len(group),
+                    )
+                    group = [
+                        g for g in group
+                        if g[1] is not None and math.isfinite(g[1])
+                    ]
+                if len(group) < 2:
+                    continue
+                rewards_G = [r for _, r, _, _, _ in group]
                 mean_reward = sum(rewards_G) / len(rewards_G)
-                advantages_G = [r - mean_reward for r in rewards_G]
                 rewards_P.append(mean_reward)
 
-                # Skip if all completions got the same reward (no learning signal)
-                if all(a == 0.0 for a in advantages_G):
+                # Snap rewards to the reward_snap grid so sub-grid differences are ties.
+                snap = config.reward_snap
+                snapped_G = [round(r / snap) * snap for r in rewards_G] if snap > 0 else rewards_G
+
+                spread = max(snapped_G) - min(snapped_G)
+                if spread < config.min_reward_spread:
+                    logger.debug(
+                        "Batch %d traj %d: spread=%.4f < threshold=%.4f, skipping",
+                        global_batch_idx, traj_idx, spread, config.min_reward_spread,
+                    )
                     continue
 
+                snapped_mean = sum(snapped_G) / len(snapped_G)
+                advantages_G = [r - snapped_mean for r in snapped_G]
+                if config.normalize_advantage:
+                    var = sum(a * a for a in advantages_G) / len(advantages_G)
+                    std = var ** 0.5
+                    advantages_G = [a / (std + config.advantage_eps) for a in advantages_G]
+
                 ob_len = prompt.length - 1
-                for sampled_tokens, logprobs, advantage in zip(
-                    sampled_tokens_G_T, logprobs_G_T, advantages_G
-                ):
+                for (_, _, sampled_tokens, logprobs, _), advantage in zip(group, advantages_G):
+                    # Guard the optimizer: a single non-finite advantage or sampled-token
+                    # logprob (e.g. a -inf logprob from the sampler) NaNs the PPO loss,
+                    # which NaNs the LoRA weights, after which every sample 400s and the
+                    # run dies. Drop such datums instead of poisoning the gradient step.
+                    if not math.isfinite(advantage) or any(
+                        lp is None or not math.isfinite(lp) for lp in logprobs
+                    ):
+                        logger.warning(
+                            "Batch %d traj %d: non-finite advantage/logprob, skipping datum",
+                            global_batch_idx, traj_idx,
+                        )
+                        continue
                     model_input = prompt.append(
                         types.EncodedTextChunk(tokens=sampled_tokens[:-1])
                     )
@@ -358,8 +706,18 @@ def main(config: Config) -> None:
                     "Batch %d: all advantages zero, skipping gradient step", global_batch_idx
                 )
             else:
+                # NOTE: the "ppo" loss reads its clip bounds from per-token
+                # loss_fn_inputs tensors (clip_low_threshold/clip_high_threshold on
+                # each Datum), NOT from loss_fn_config. Passing them via config left
+                # the clip undefined (≈0), which zeroed the gradient on positive-
+                # advantage tokens and prevented any learning. importance_sampling is
+                # the reference recipe's default; it needs no clip config and uses the
+                # target_tokens/logprobs/advantages we already provide. Near-on-policy
+                # here (weights re-snapshot every batch, one optim step), so clipping
+                # is not required.
                 fwd_bwd_future = training_client.forward_backward(
-                    datums_D, loss_fn="importance_sampling"
+                    datums_D,
+                    loss_fn="importance_sampling",
                 )
                 optim_step_future = training_client.optim_step(adam_params)
                 fwd_bwd_future.result()
