@@ -1,12 +1,132 @@
 """
-tts.utils.logprob — per-token KL scoring via a vLLM-compatible server.
+tts.utils.logprob — per-token distortion scoring via a vLLM-compatible server.
+
+The per-token distortion is the realized-token logprob difference
+
+    d_t = log p(y_t | y<t, x) − log p(y_t | y<t, z)
+
+i.e. how much less likely the *actual* continuation token y_t becomes when the
+full context x is compressed to the summary z. This is a single-sample estimate
+of the forward KL D_KL(p(·|x) ‖ p(·|z)); unlike a top-k-truncated KL it keeps the
+high-divergence tokens (where bad summaries should be penalized most), giving a
+much larger dynamic range across summaries.
 """
 
 from __future__ import annotations
 
-import math
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 
 import litellm
+
+for _name in ("litellm", "LiteLLM", "litellm.utils", "litellm.proxy"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+
+_THINK_OPEN = "<think>\n"
+_THINK_CLOSED = "<think>\n\n</think>\n\n"
+
+
+def _text_completion(model, base, prompt, max_tokens, logprobs, echo):
+    return litellm.text_completion(
+        model=model, base_url=base, api_key="dummy",
+        prompt=prompt, max_tokens=max_tokens, logprobs=logprobs, echo=echo,
+    )
+
+
+def _close_think_block(text: str) -> str:
+    """Replace trailing open <think> with a closed block so logprobs align with thinking-disabled continuations."""
+    if text.endswith(_THINK_OPEN):
+        return text[: -len(_THINK_OPEN)] + _THINK_CLOSED
+    return text
+
+
+@dataclass
+class XLogprobs:
+    n_x_ctx: int
+    n_completion: int
+    x_tok: list  # realized-token logprob log p(y_t|y<t,x), one per completion token
+
+
+def precompute_x(
+    x_messages: list[dict],
+    completion: str,
+    model: str,
+    api_base: str,
+    tokenizer,
+    k: int = 20,
+    tools: list | None = None,
+) -> XLogprobs | None:
+    """
+    Pre-compute x-context logprobs for a fixed (trajectory, continuation) pair.
+
+    Makes 2 API calls (context length + full scoring). The result can be
+    reused across all group_size summaries for the same trajectory, avoiding
+    redundant x-side scoring.
+    """
+    if not completion.strip():
+        return XLogprobs(n_x_ctx=0, n_completion=0, x_tok=[])
+
+    base = api_base.rstrip("/")
+    vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
+    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True, tools=tools))
+
+    n_x_ctx = len(tokenizer.encode(x_text))
+
+    try:
+        x_resp = _text_completion(vllm_model, base, x_text + completion, 1, k, True)
+        n_x_full = x_resp["usage"]["prompt_tokens"]
+        n_completion = n_x_full - n_x_ctx
+        x_tok = x_resp["choices"][0]["logprobs"].token_logprobs[n_x_ctx:n_x_full]
+    except Exception as exc:
+        print(f"    [score] x-context scoring failed: {exc}")
+        return None
+
+    return XLogprobs(n_x_ctx=n_x_ctx, n_completion=n_completion, x_tok=x_tok)
+
+
+def score_completion_z(
+    x_logprobs: XLogprobs,
+    z_messages: list[dict],
+    completion: str,
+    model: str,
+    api_base: str,
+    tokenizer,
+    k: int = 20,
+    tools: list | None = None,
+) -> list[float] | None:
+    """
+    Score the z-context side and compute the per-token realized-token distortion
+    d_t = log p_x(y_t) − log p_z(y_t) against pre-computed x logprobs.
+
+    Makes 2 API calls (z context length + full z scoring).
+    """
+    if not completion.strip() or x_logprobs.n_completion == 0:
+        return []
+
+    base = api_base.rstrip("/")
+    vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
+    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True, tools=tools))
+
+    n_z_ctx = len(tokenizer.encode(z_text))
+
+    try:
+        z_resp = _text_completion(vllm_model, base, z_text + completion, 1, k, True)
+        z_tok = z_resp["choices"][0]["logprobs"].token_logprobs[
+            n_z_ctx : n_z_ctx + x_logprobs.n_completion
+        ]
+    except Exception as exc:
+        print(f"    [score] z-context scoring failed: {exc}")
+        return None
+
+    x_tok = x_logprobs.x_tok
+    n = min(len(x_tok), len(z_tok))
+    return [
+        x_tok[t] - z_tok[t]
+        for t in range(n)
+        if x_tok[t] is not None and z_tok[t] is not None
+    ]
 
 
 def score_completion(
@@ -19,77 +139,49 @@ def score_completion(
     k: int = 20,
 ) -> list[float] | None:
     """
-    Estimate per-position KL D_KL(p(·|x) ‖ p(·|z)) using top-k distributions.
+    Per-position realized-token distortion d_t = log p_x(y_t) − log p_z(y_t).
 
-    At each completion position t, sums over tokens in the intersection of
-    x-context and z-context top-k lists:
-
-        KL_t ≈ Σ_{v ∈ top_k(x) ∩ top_k(z)} p_x(v) · (log p_x(v) − log p_z(v))
+    At each completion position t, reads the logprob of the *actual* continuation
+    token y_t under the x-context and the z-context and returns their difference.
+    This is a single-sample estimate of the forward KL D_KL(p(·|x) ‖ p(·|z)).
 
     Context texts are produced via tokenizer.apply_chat_template so the
     tokenization matches exactly what the model sees during inference.
 
-    4 API calls total: 2 cheap context-length calls (logprobs=1),
-    then 2 full-prompt calls with top-k distributions.
+    2 parallel full-prompt calls (echo + logprobs) for the realized-token logprobs.
 
-    Returns one KL float per completion token, or None on error.
+    Returns one distortion float per completion token, or None on error.
     """
     if not completion.strip():
         return []
 
     base = api_base.rstrip("/")
     vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
-    x_text = tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True)
-    z_text = tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True)
+    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True))
+    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True))
 
-    # Step 1: context token counts
-    try:
-        n_x_ctx = litellm.text_completion(
-            model=vllm_model, base_url=base, api_key="dummy",
-            prompt=x_text, max_tokens=1, logprobs=1, echo=True,
-        )["usage"]["prompt_tokens"]
-        n_z_ctx = litellm.text_completion(
-            model=vllm_model, base_url=base, api_key="dummy",
-            prompt=z_text, max_tokens=1, logprobs=1, echo=True,
-        )["usage"]["prompt_tokens"]
-    except Exception as exc:
-        print(f"    [score] Context tokenisation failed: {exc}")
-        return None
+    n_x_ctx = len(tokenizer.encode(x_text))
+    n_z_ctx = len(tokenizer.encode(z_text))
 
-    # Step 2: full-prompt top-k scoring
-    # n_completion is the same for x and z since the completion text is identical.
+    # Full-prompt realized-token scoring (parallel)
     try:
-        x_resp = litellm.text_completion(
-            model=vllm_model, base_url=base, api_key="dummy",
-            prompt=x_text + completion, max_tokens=1, logprobs=k, echo=True,
-        )
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fx = ex.submit(_text_completion, vllm_model, base, x_text + completion, 1, k, True)
+            fz = ex.submit(_text_completion, vllm_model, base, z_text + completion, 1, k, True)
+            x_resp = fx.result()
+            z_resp = fz.result()
         n_x_full = x_resp["usage"]["prompt_tokens"]
         n_completion = n_x_full - n_x_ctx
-        x_top = x_resp["choices"][0]["logprobs"].top_logprobs[n_x_ctx:n_x_full]
+        x_tok = x_resp["choices"][0]["logprobs"].token_logprobs[n_x_ctx:n_x_full]
+        z_tok = z_resp["choices"][0]["logprobs"].token_logprobs[n_z_ctx:n_z_ctx + n_completion]
     except Exception as exc:
-        print(f"    [score] x-context scoring failed: {exc}")
+        print(f"    [score] Full-prompt scoring failed: {exc}")
         return None
 
-    try:
-        z_resp = litellm.text_completion(
-            model=vllm_model, base_url=base, api_key="dummy",
-            prompt=z_text + completion, max_tokens=1, logprobs=k, echo=True,
-        )
-        z_top = z_resp["choices"][0]["logprobs"].top_logprobs[n_z_ctx:n_z_ctx + n_completion]
-    except Exception as exc:
-        print(f"    [score] z-context scoring failed: {exc}")
-        return None
-
-    # Step 3: per-position KL over intersection of top-k tokens (forward KL, teacher-weighted)
-    n = min(len(x_top), len(z_top))
-    kl_per_token: list[float] = []
-    for t in range(n):
-        x_dist: dict[str, float] = x_top[t] or {}
-        z_dist: dict[str, float] = z_top[t] or {}
-        kl_t = 0.0
-        for token, lp_x in x_dist.items():
-            if token in z_dist:
-                kl_t += math.exp(lp_x) * (lp_x - z_dist[token])
-        kl_per_token.append(kl_t)
-
-    return kl_per_token
+    # per-position realized-token distortion: log p_x(y_t) − log p_z(y_t)
+    n = min(len(x_tok), len(z_tok))
+    return [
+        x_tok[t] - z_tok[t]
+        for t in range(n)
+        if x_tok[t] is not None and z_tok[t] is not None
+    ]
