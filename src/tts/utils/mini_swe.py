@@ -113,6 +113,17 @@ def get_sb_environment(config: dict, instance: dict, data_source: str, max_retri
         elif env_config["environment_class"] == "singularity":
             env_config["image"] = f"docker://{image_name}"
 
+    # The cluster's apptainer.conf sets `mount hostfs = yes`, so apptainer prints a
+    # `WARNING: Skipping mount ... [hostfs]` line to each command's stdout for every
+    # host path missing in the image. Those warnings land on line 0 of the output and
+    # break mini-swe's submission detection (which needs the COMPLETE_TASK marker to
+    # be line 0), so the agent can never submit. `--no-mount hostfs` disables the
+    # config's hostfs binds (not needed inside the container) and restores clean output.
+    if env_config["environment_class"] == "singularity":
+        env_config.setdefault(
+            "exec_args", ["--contain", "--cleanenv", "--fakeroot", "--no-mount", "hostfs"]
+        )
+
     for attempt in range(max_retries):
         try:
             env = get_environment(env_config)

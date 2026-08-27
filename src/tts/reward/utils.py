@@ -1,102 +1,133 @@
 """
-tts.reward.utils — shared utilities for reward computation.
+tts.reward.utils — pieces shared across reward components.
+
+The distortion computation lives in distortion_reward.py and the anti-copy
+penalty in copy_penalty.py; what remains here is what both (and, for
+messages_text, tts.data) reach for — chiefly recovering y, the exact token
+stream an agent turn was generated as.
 """
 
 from __future__ import annotations
 
-from tts.utils.logprob import score_completion
-from tts.summarization.utils import format_continuation
+import copy
+import json
+from dataclasses import dataclass
 
 
-def last_n_turns(messages: list[dict], n: int) -> list[dict]:
-    """
-    Return messages for the last n complete (assistant, tool) turns.
-
-    Always ends on a tool message so the context is never cut mid-turn.
-    If fewer than n complete turns exist, returns all messages.
-    """
-    if n <= 0:
-        return []
-    tool_count = 0
-    for i in range(len(messages) - 1, -1, -1):
-        if messages[i].get("role") == "tool":
-            tool_count += 1
-            if tool_count == n:
-                j = i - 1
-                while j >= 0 and messages[j].get("role") != "tool":
-                    j -= 1
-                return messages[j + 1:]
-    return messages
-
-
-def build_x_scoring_messages(partial_messages: list[dict]) -> list[dict]:
-    """x-context: the full original message history."""
-    return partial_messages
-
-
-def build_z_scoring_messages(
-    summary: str,
-    partial_messages: list[dict],
-    max_size: int = 20,
-    keep_first: int = 4,
-) -> list[dict]:
-    """
-    z-context: [first keep_first msgs verbatim, user(summary), tail turns verbatim].
-
-    max_size:   target total message budget for the z-context (before summary insertion).
-                Tail size = max_size // 2 - keep_first messages = that many // 2 turns.
-    keep_first: messages preserved verbatim from the start (sys, user task, first turn(s)).
-    """
-    first = partial_messages[:keep_first]
-    tail_messages = max_size // 2 - keep_first
-    keep_turns = tail_messages // 2
-    last_turns = last_n_turns(partial_messages, keep_turns)
-    summary_msg = {"role": "user", "content": f"<summary>\n{summary}\n</summary>"}
-    return first + [summary_msg] + last_turns
-
-
-def compute_distortion(
-    partial_messages: list[dict],
-    summary: str,
-    continuation_messages: list[dict],
-    model: str,
-    api_base: str,
-    tokenizer,
-    max_size: int = 20,
-    keep_first: int = 4,
-) -> dict:
-    """
-    Compute the KL-distortion reward components.
-
-    distortion(x, z) = (1/|y|) Σ_t KL_t
-    where KL_t = Σ_{v ∈ top_k(x) ∩ top_k(z)} p_x(v) · (log p_x(v) − log p_z(v))
-
-    max_size and keep_first control the z-context structure; see build_z_scoring_messages.
-
-    Returns a dict with distortion, fidelity, and token count.
-    Returns {"error": ...} on failure.
-    """
-    x_messages = build_x_scoring_messages(partial_messages)
-    z_messages = build_z_scoring_messages(
-        summary, partial_messages, max_size=max_size, keep_first=keep_first
+def messages_text(messages: list[dict]) -> str:
+    """Flatten message contents to plain text, for overlap/length comparison against z."""
+    return "\n".join(
+        str(m.get("content") or "") for m in messages if m.get("role") != "system"
     )
-    y_text = format_continuation(x_messages, continuation_messages, tokenizer)
 
-    kl_per_token = score_completion(x_messages, z_messages, y_text, model, api_base, tokenizer)
 
-    if kl_per_token is None:
-        return {"error": "score_completion failed", "fidelity": None}
+def to_template_tool_calls(messages: list[dict]) -> list[dict]:
+    """
+    Parse tool_call arguments from JSON strings into dicts.
 
-    n = len(kl_per_token)
-    if n == 0:
-        return {"error": "No completion tokens scored", "fidelity": None}
+    Trajectories store the wire format (a string, as model_dump produces) but
+    the Jinja template calls .items() on the same field and raises on a string.
+    Anything headed for apply_chat_template needs this first.
+    """
+    out = copy.deepcopy(messages)
+    for m in out:
+        for tc in m.get("tool_calls") or []:
+            args = tc.get("function", {}).get("arguments")
+            if isinstance(args, str):
+                try:
+                    tc["function"]["arguments"] = json.loads(args)
+                except (json.JSONDecodeError, ValueError):
+                    tc["function"]["arguments"] = {}
+    return out
 
-    distortion = sum(kl_per_token) / n
-    fidelity = -distortion
-    return {
-        "fidelity": fidelity,
-        "distortion": distortion,
-        "n_tokens": n,
-        "n_x_messages": len(x_messages),
-        "n_z_messages": len(z_messages),
-    }
+
+def strip_reasoning(messages: list[dict]) -> list[dict]:
+    """Drop `reasoning_content` from every message in a *context*.
+
+    Inference goes through /v1/chat/completions, whose OpenAI-schema validation
+    has no reasoning_content field, so prior-turn reasoning is dropped before the
+    chat template runs (see tests/tokenization/test_vllm_render.py). Fidelity
+    renders the context locally and posts text to /v1/completions, which would
+    otherwise keep that reasoning — scoring a context the model never actually
+    sees. Stripping here makes the scored prompt byte-identical to what inference
+    tokenizes.
+
+    Apply to the context only. The scored completion y keeps its reasoning: the
+    model generates that live in the same turn, so it is part of the next action,
+    not prior-turn history.
+    """
+    out = copy.deepcopy(messages)
+    for m in out:
+        m.pop("reasoning_content", None)
+    return out
+
+
+@dataclass
+class Generation:
+    """The token stream an assistant message was produced as."""
+
+    text: str
+    token_ids: list[int]
+    recorded_n_tokens: int | None = None  # usage.completion_tokens, when recorded
+
+    @property
+    def n_tokens(self) -> int:
+        return len(self.token_ids)
+
+    @property
+    def verified(self) -> bool | None:
+        """
+        True when the reconstruction matches the recorded token count.
+
+        None when the trajectory recorded no usage to check against. Note this
+        verifies the *count*, not the ids — nothing in a standard trajectory
+        records ids, so identity cannot be proven, only strongly evidenced.
+        """
+        if self.recorded_n_tokens is None:
+            return None
+        return self.n_tokens == self.recorded_n_tokens
+
+
+def reconstruct_generation(
+    context_messages: list[dict],
+    assistant_message: dict,
+    tokenizer,
+    tools: list | None = None,
+) -> Generation:
+    """
+    Recover the exact token stream an assistant turn was generated as.
+
+    Servers rarely persist completion token ids (vLLM leaves prompt_token_ids
+    and logprobs null unless asked), so the generation is re-derived: render the
+    conversation with and without the turn and take the delta past the
+    generation prompt.
+
+    The template appends a '\\n' separator after every message, including the
+    last. The model never generates it — it emits <|im_end|> (the eos token) and
+    stops — so it is stripped. Keeping it would add one token of pure template
+    artifact to every scored continuation.
+
+    Verified count-exact on 514/514 assistant turns across 8 SWE-bench-lite
+    Qwen3.6-35B-A3B trajectories; `Generation.verified` re-checks per call.
+    """
+    ctx = to_template_tool_calls(context_messages)
+    act = to_template_tool_calls([assistant_message])
+    kw = {"tokenize": False}
+    if tools:
+        kw["tools"] = tools
+
+    full = tokenizer.apply_chat_template(ctx + act, add_generation_prompt=False, **kw)
+    prompt = tokenizer.apply_chat_template(ctx, add_generation_prompt=True, **kw)
+    if not full.startswith(prompt):
+        raise ValueError(
+            "generation prompt is not a prefix of the full render; "
+            "context and assistant message may not be adjacent turns"
+        )
+    text = full[len(prompt):].rstrip("\n")
+
+    usage = (assistant_message.get("extra") or {}).get("response", {}).get("usage") or {}
+    return Generation(
+        text=text,
+        token_ids=tokenizer.encode(text),
+        recorded_n_tokens=usage.get("completion_tokens"),
+    )

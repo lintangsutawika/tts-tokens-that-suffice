@@ -84,8 +84,13 @@ from tts.data.agent_trajectory import (
 )
 from minisweagent.models.utils.actions_toolcall import BASH_TOOL
 
-from tts.reward.reverse_kl_reward import distortion_reward, distortion_reward_z
-from tts.reward.utils import XContext, build_z_scoring_messages, precompute_x_context
+from tts.reward.copy_penalty import copy_penalty
+from tts.reward.distortion_reward import (
+    XContext,
+    distortion_reward_z_multi,
+    precompute_x_contexts,
+)
+from tts.summarization.model_based import build_z_scoring_messages, strip_thinking
 
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARN)
@@ -100,16 +105,37 @@ class Config:
     batch_size: int = 32       # trajectories per gradient step
     group_size: int = 8        # candidate summaries sampled per trajectory
     learning_rate: float = 4e-5
-    max_tokens: int = 512      # max generated summary length
+    # Generation budget for the summarizer (non-thinking renderer, so this is the summary
+    # itself). It doubles as a hard anti-copy bound: a 16k-token context cannot be
+    # transcribed into 512 tokens, so the ceiling forecloses verbatim copying outright,
+    # where the reward penalties only make it unprofitable.
+    max_tokens: int = 512
     lora_rank: int = 32
     save_every: int = 20
     ttl_seconds: int | None = 604800
     num_epochs: int = 1
     # Reward function: "coverage" or "distortion"
     reward_fn: str = "coverage"
-    # Length-penalty coefficient λ for the distortion reward.
-    # Positive values encourage shorter summaries.
+    # Anti-copy terms for the distortion reward. Fidelity alone peaks at z = x, so with
+    # all of these at 0 the policy's optimal move is to transcribe its input verbatim —
+    # which is exactly how the first summarizer-rl run collapsed. Keep distortion_lambda
+    # > 0 at minimum.
+    # λ: length penalty, applied to |z|/|x| in tokens (relative, not absolute word count).
     distortion_lambda: float = 0.0
+    # Penalty for verbatim n-gram overlap with x beyond distortion_copy_threshold.
+    distortion_lambda_copy: float = 0.0
+    # Overlap fraction tolerated before the copy penalty starts (paraphrase reuses some
+    # identifiers and paths, so a small overlap is expected and not punished).
+    distortion_copy_threshold: float = 0.3
+    # Flat penalty when z echoes the <EVENT>/tool-call scaffolding of its input.
+    distortion_marker_penalty: float = 0.0
+    # Temperature for the bounded per-token tanh contrast. When > 0 the fidelity base
+    # becomes (1/|y|) Σ_t tanh(Δ_t/β), Δ_t = log p(y_t|z) − log p(y_t|x): bounded to
+    # (-1, 1), 0 at parity, +1 z far better / −1 far worse. Absolute logprobs aren't
+    # comparable across prompts — only this paired same-y contrast is — and per-token
+    # bounding caps an outlier token from dominating the mean (see bounded_fidelity).
+    # β sets how large a per-token log-ratio counts as decisive (~1–2 nats). 0 = raw fidelity.
+    distortion_beta: float = 0.0
     # URL and model name of the vLLM scoring server (used only when reward_fn="distortion").
     scoring_base_url: str = "http://localhost:8000/v1"
     scoring_model: str = "Qwen/Qwen3.5-27B"
@@ -117,9 +143,29 @@ class Config:
     distortion_max_size: int = 20
     # Messages to keep verbatim from the start of the trajectory in z-context.
     distortion_keep_first: int = 4
+    # How many succeeding agent turns to score the summary against. The reward is
+    # the mean fidelity over R_0..R_{n-1}, each teacher-forced on the real turns
+    # before it (see distortion_reward_z_multi). 1 = the original next-action-only
+    # reward. >1 rewards a summary for supporting a run of decisions.
+    distortion_n_turns: int = 1
     # Min steps in prefix / suffix when sampling a random split from full trajectories.
     min_split_prefix: int = 3
     min_split_suffix: int = 3
+    # Split each trajectory where its context first reaches this many tokens, instead
+    # of at a random turn — set it to the eval's compress_at_tokens so the summarizer
+    # trains on the context lengths it is actually invoked at. 0 = random split.
+    # Trajectories that never reach the threshold are dropped, so raising it shrinks
+    # the usable dataset (at 16384 ≈54% of trajectories survive; at 24000 ≈29%).
+    split_at_tokens: int = 0
+    # Budget for the whole COMPACTED CONTEXT — head(keep_first) + summary + tail
+    # (keep_last_turns), i.e. h4t3 plus the summary, not the summary alone. The
+    # continuation is capped at the remainder (split_at_tokens - this) so that
+    # compaction + continuation stays inside one trigger window.
+    compaction_token_budget: int = 9000
+    # Head and tail are verbatim and not under the summarizer's control, so a bloated
+    # tool output in the tail can eat the whole budget. Drop a trajectory when h4t3
+    # leaves less than this much room for the summary to occupy.
+    min_summary_tokens: int = 512
     # Renderer name override. Defaults to the model's recommended renderer.
     # Use "qwen3_instruct" to disable thinking for Qwen3/Qwen3.5 instruct models.
     renderer_name: str | None = None
@@ -130,8 +176,14 @@ class Config:
     sampling_temperature: float = 1.0
     # Minimum within-group reward spread to use a group for training.
     # Groups below this threshold are skipped as low-signal noise.
-    # Scaled for the realized-token distortion reward (typical spread ~0.2).
-    min_reward_spread: float = 0.1
+    # Measured over 941 groups of the lr=1e-4 run: median spread is 0.073, falling to
+    # ~0.048 late in training as the policy converges — so 0.1 dropped ~59% of groups
+    # overall and ~78% by the last quarter, which is what stalled that run. Keep this
+    # below the median spread; advantage_eps already attenuates low-variance groups
+    # smoothly, so this hard filter only needs to catch degenerate (spread≈0) groups.
+    # Keep it off a reward_snap multiple: snapped spreads land exactly on the
+    # threshold and float error (0.09999...) then drops groups that should qualify.
+    min_reward_spread: float = 0.02
     # Snap rewards to this grid before computing advantages; differences smaller
     # than this value are treated as ties (advantage 0). Set to 0 to disable.
     reward_snap: float = 0.05
@@ -232,6 +284,68 @@ def main(config: Config) -> None:
         logger.info("Loaded %d pre-split trajectories", len(trajectories))
         split_at_train_time = False
 
+    # Match the eval-time compression trigger: split each trajectory where its
+    # context first reaches split_at_tokens, rather than at a random turn. The
+    # split point is deterministic, so we take it once here instead of per-batch;
+    # trajectories that never reach the threshold (or leave too little
+    # prefix/suffix around it) cannot form a valid pair and are dropped.
+    if config.split_at_tokens > 0:
+        if not split_at_train_time:
+            raise ValueError("split_at_tokens requires full (unsplit) trajectories")
+        max_continuation = config.split_at_tokens - config.compaction_token_budget
+        if max_continuation <= 0:
+            raise ValueError(
+                f"compaction_token_budget={config.compaction_token_budget} leaves no room for "
+                f"the continuation within split_at_tokens={config.split_at_tokens}"
+            )
+        before = len(trajectories)
+        split = [
+            s
+            for t in tqdm(trajectories, desc=f"threshold split @{config.split_at_tokens}tok", unit="traj")
+            if (
+                s := t.threshold_split(
+                    tokenizer,
+                    split_at_tokens=config.split_at_tokens,
+                    min_prefix=config.min_split_prefix,
+                    min_suffix=config.min_split_suffix,
+                    max_continuation_tokens=max_continuation,
+                )
+            )
+            is not None
+        ]
+        # h4t3 is verbatim; if it already fills the compaction budget the summary has
+        # nowhere to go, so those trajectories cannot be trained on at this budget.
+        max_h4t3 = config.compaction_token_budget - config.min_summary_tokens
+        keep_last_turns = (
+            # Same derivation as build_z_scoring_messages: the tail message budget is
+            # max_size//2 - keep_first, and each turn is 2 messages.
+            config.distortion_max_size // 2 - config.distortion_keep_first
+        ) // 2
+        trajectories = [
+            s
+            for s in tqdm(split, desc=f"compaction filter (h4t{keep_last_turns})", unit="traj")
+            if s.compaction_tokens(
+                tokenizer,
+                keep_first=config.distortion_keep_first,
+                keep_last_turns=keep_last_turns,
+            )
+            <= max_h4t3
+        ]
+        if not trajectories:
+            raise ValueError(
+                f"No trajectory reaches split_at_tokens={config.split_at_tokens} with "
+                f"min_prefix={config.min_split_prefix}/min_suffix={config.min_split_suffix} "
+                f"and h4t3 <= {max_h4t3}"
+            )
+        logger.info(
+            "Threshold split @%d tok (compaction budget %d = h4t3+summary, continuation cap %d): "
+            "kept %d/%d (%.0f%%); %d dropped for h4t3 > %d",
+            config.split_at_tokens, config.compaction_token_budget, max_continuation,
+            len(trajectories), before, 100 * len(trajectories) / before,
+            len(split) - len(trajectories), max_h4t3,
+        )
+        split_at_train_time = False  # already split; do not re-split per batch
+
     # Reserve a fixed held-out eval set from the END of the dataset (never trained
     # on). Splits are pinned with eval_seed and x-contexts precomputed once, so the
     # eval reward isolates policy improvement from the per-batch data-ordering noise
@@ -267,12 +381,13 @@ def main(config: Config) -> None:
             sys_prompt = et.agent_system_prompt or AGENT_SYSTEM_PROMPT
             partial = steps_to_messages(et.steps, et.task, system_prompt=sys_prompt)
             cont = steps_to_messages(et.continuation, et.task, system_prompt=sys_prompt)[2:]
-            x_ctx = precompute_x_context(
+            x_ctxs = precompute_x_contexts(
                 partial_messages=partial, continuation_messages=cont,
+                n_turns=config.distortion_n_turns,
                 model=config.scoring_model, api_base=config.scoring_base_url,
                 tokenizer=tokenizer, tools=[BASH_TOOL],
             )
-            return (et, x_ctx)
+            return (et, x_ctxs or None)
 
         with ThreadPoolExecutor(max_workers=len(eval_trajs)) as ex:
             eval_set = list(ex.map(_precompute_eval_x, eval_trajs))
@@ -353,27 +468,32 @@ def main(config: Config) -> None:
             )
 
         def _eval_one(args) -> float | None:
-            (et, x_ctx), future = args
+            (et, x_ctxs), future = args
             try:
                 result = future.result()
             except Exception as exc:
                 logger.warning("Eval sampling failed for %s: %s", et.trajectory_id, exc)
                 return None
             parsed_message, _ = renderer.parse_response(result.sequences[0].tokens)
-            summary = renderers.get_text_content(parsed_message)
+            summary = strip_thinking(renderers.get_text_content(parsed_message))
             if config.reward_fn == "distortion":
-                if x_ctx is None:
+                if x_ctxs is None:
                     return None
                 partial = steps_to_messages(
                     et.steps, et.task,
                     system_prompt=et.agent_system_prompt or AGENT_SYSTEM_PROMPT,
                 )
-                r = distortion_reward_z(
-                    x_ctx=x_ctx, summary=summary, partial_messages=partial,
+                r = distortion_reward_z_multi(
+                    x_ctxs=x_ctxs, summary=summary, partial_messages=partial,
                     model=config.scoring_model, api_base=config.scoring_base_url,
                     tokenizer=tokenizer, max_size=config.distortion_max_size,
                     keep_first=config.distortion_keep_first,
-                    lambda_len=config.distortion_lambda, tools=[BASH_TOOL],
+                    lambda_len=config.distortion_lambda,
+                    lambda_copy=config.distortion_lambda_copy,
+                    copy_threshold=config.distortion_copy_threshold,
+                    marker_penalty=config.distortion_marker_penalty,
+                    beta=config.distortion_beta,
+                    tools=[BASH_TOOL],
                 )
             else:
                 r = coverage_reward(summary, et)
@@ -491,7 +611,7 @@ def main(config: Config) -> None:
             # This reduces API calls from 4*group_size to 2 + 2*group_size per trajectory.
             #
             # Step 1: resolve sampling futures and collect work items.
-            WorkItem = tuple  # (traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx)
+            WorkItem = tuple  # (traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctxs)
             work_items: list[WorkItem] = []
 
             if config.reward_fn == "distortion":
@@ -500,16 +620,18 @@ def main(config: Config) -> None:
                     sys_prompt = traj.agent_system_prompt or AGENT_SYSTEM_PROMPT
                     partial_messages = steps_to_messages(traj.steps, traj.task, system_prompt=sys_prompt)
                     continuation_messages = steps_to_messages(traj.continuation, traj.task, system_prompt=sys_prompt)[2:]
-                    return traj_idx, precompute_x_context(
+                    x_ctxs = precompute_x_contexts(
                         partial_messages=partial_messages,
                         continuation_messages=continuation_messages,
+                        n_turns=config.distortion_n_turns,
                         model=config.scoring_model,
                         api_base=config.scoring_base_url,
                         tokenizer=tokenizer,
                         tools=[BASH_TOOL],
                     )
+                    return traj_idx, (x_ctxs or None)
 
-                x_ctx_map: dict[int, XContext | None] = {}
+                x_ctx_map: dict[int, list | None] = {}
                 with ThreadPoolExecutor(max_workers=len(batch_trajectories)) as ex:
                     x_futures = {
                         ex.submit(_precompute_x_for_traj, (i, t)): i
@@ -520,8 +642,8 @@ def main(config: Config) -> None:
                         total=len(x_futures),
                         desc=f"Precompute x batch {global_batch_idx}",
                     ):
-                        traj_idx, x_ctx = xf.result()
-                        x_ctx_map[traj_idx] = x_ctx
+                        traj_idx, x_ctxs = xf.result()
+                        x_ctx_map[traj_idx] = x_ctxs
             else:
                 x_ctx_map = {}
 
@@ -540,23 +662,23 @@ def main(config: Config) -> None:
                         global_batch_idx, traj_idx, exc,
                     )
                     continue
-                x_ctx = x_ctx_map.get(traj_idx)
+                x_ctxs = x_ctx_map.get(traj_idx)
                 for seq_idx, sequence in enumerate(sample_result.sequences):
                     assert sequence.logprobs is not None
                     parsed_message, _ = renderer.parse_response(sequence.tokens)
-                    content = renderers.get_text_content(parsed_message)
+                    content = strip_thinking(renderers.get_text_content(parsed_message))
                     work_items.append(
-                        (traj_idx, seq_idx, traj, convo, prompt, sequence.tokens, sequence.logprobs, content, x_ctx)
+                        (traj_idx, seq_idx, traj, convo, prompt, sequence.tokens, sequence.logprobs, content, x_ctxs)
                     )
 
             # Step 2: score all summaries in parallel (z-only for distortion).
             def _score_item(item: WorkItem) -> tuple[int, int, float | None, list[int], list[float], list[dict]]:
-                traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx = item
+                traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctxs = item
                 if config.reward_fn == "distortion":
                     partial_messages = steps_to_messages(traj.steps, traj.task, system_prompt=traj.agent_system_prompt or AGENT_SYSTEM_PROMPT)
-                    if x_ctx is not None:
-                        reward = distortion_reward_z(
-                            x_ctx=x_ctx,
+                    if x_ctxs is not None:
+                        reward = distortion_reward_z_multi(
+                            x_ctxs=x_ctxs,
                             summary=content,
                             partial_messages=partial_messages,
                             model=config.scoring_model,
@@ -565,6 +687,10 @@ def main(config: Config) -> None:
                             max_size=config.distortion_max_size,
                             keep_first=config.distortion_keep_first,
                             lambda_len=config.distortion_lambda,
+                            lambda_copy=config.distortion_lambda_copy,
+                            copy_threshold=config.distortion_copy_threshold,
+                            marker_penalty=config.distortion_marker_penalty,
+                            beta=config.distortion_beta,
                             tools=[BASH_TOOL],
                         )
                     else:
@@ -590,7 +716,7 @@ def main(config: Config) -> None:
                 summaries_path = os.path.join(config.log_path, "summaries.jsonl")
                 with open(summaries_path, "a") as f:
                     for item in work_items:
-                        traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctx = item
+                        traj_idx, seq_idx, traj, convo, prompt, tokens, logprobs, content, x_ctxs = item
                         group_scores = scored.get(traj_idx, [])
                         reward = next((r for si, r, _, _, _ in group_scores if si == seq_idx), None)
                         partial_messages = steps_to_messages(
@@ -602,6 +728,16 @@ def main(config: Config) -> None:
                             max_size=config.distortion_max_size,
                             keep_first=config.distortion_keep_first,
                         )
+                        # Copy metrics travel with each summary so the collapse into
+                        # transcription is visible in the log (overlap -> 1) rather than
+                        # only showing up as a mystery reward plateau.
+                        _, copy_info = copy_penalty(
+                            content, partial_messages, tokenizer,
+                            lambda_len=config.distortion_lambda,
+                            lambda_copy=config.distortion_lambda_copy,
+                            copy_threshold=config.distortion_copy_threshold,
+                            marker_penalty=config.distortion_marker_penalty,
+                        )
                         f.write(json.dumps({
                             "batch": global_batch_idx,
                             "traj_idx": traj_idx,
@@ -611,6 +747,7 @@ def main(config: Config) -> None:
                             "n_continuation_steps": len(traj.continuation),
                             "reward": reward,
                             "summary": content,
+                            "copy": copy_info,
                             "summarizer_input": convo,
                             "deliberator_input": z_messages,
                         }) + "\n")

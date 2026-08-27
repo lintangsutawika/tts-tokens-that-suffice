@@ -7,7 +7,7 @@ Two backends produce z from the same prompt:
   * TinkerSummarizer  — a tinker SamplingClient (base model or trained LoRA),
                         used during training and by --mode base/trained
   * LitellmSummarizer — an OpenAI-compatible vLLM endpoint
-                        (scripts/serve_summarizer.sh)
+                        (scripts/serve/serve_summarizer.sh)
 
 Both are greedy so a given (trajectory, checkpoint) pair yields a fixed z.
 See mask_based.py for the summarizer-free control.
@@ -192,7 +192,7 @@ def tinker_summarize(
 
 
 class LitellmSummarizer(Summarizer):
-    """Summarize via an OpenAI-compatible vLLM endpoint (scripts/serve_summarizer.sh).
+    """Summarize via an OpenAI-compatible vLLM endpoint (scripts/serve/serve_summarizer.sh).
 
     `model` is the litellm model string (e.g. "openai/Qwen/Qwen3-8B" for base, or
     "openai/<lora-name>" for a served trained adapter). Greedy, thinking disabled
@@ -275,7 +275,7 @@ def build_summarizer(
     OpenAI-compatible vLLM endpoint (litellm backend); otherwise it is sampled
     through the tinker server (the default).
     """
-    # vLLM / litellm backend (scripts/serve_summarizer.sh).
+    # vLLM / litellm backend (scripts/serve/serve_summarizer.sh).
     if summarizer_api_base:
         api_key = os.getenv("SUMMARIZER_API_KEY") or os.getenv("OPENAI_API_KEY") or "EMPTY"
         return LitellmSummarizer(

@@ -35,9 +35,32 @@ def _text_completion(model, base, prompt, max_tokens, logprobs, echo):
     )
 
 
-def _close_think_block(text: str) -> str:
-    """Replace trailing open <think> with a closed block so logprobs align with thinking-disabled continuations."""
-    if text.endswith(_THINK_OPEN):
+def _completion_opens_in_think(completion: str) -> bool:
+    """
+    True if `completion` begins *inside* a think block.
+
+    apply_chat_template ends a generation prompt with an open "<think>\\n", so a
+    continuation carrying reasoning_content starts with the reasoning text and
+    closes with "</think>" before its tool call. Such a completion must be
+    concatenated onto the still-open block, not onto a closed one.
+    """
+    close = completion.find("</think>")
+    if close == -1:
+        return False
+    open_ = completion.find("<think>")
+    return open_ == -1 or close < open_
+
+
+def _close_think_block(text: str, completion: str = "") -> str:
+    """
+    Replace a trailing open <think> with an empty closed block.
+
+    This aligns logprobs for thinking-*disabled* continuations, which begin at
+    the assistant's visible content. When the completion supplies its own
+    reasoning, closing the block here would push that reasoning outside <think>
+    and leave its "</think>" unmatched, so leave the block open.
+    """
+    if text.endswith(_THINK_OPEN) and not _completion_opens_in_think(completion):
         return text[: -len(_THINK_OPEN)] + _THINK_CLOSED
     return text
 
@@ -55,11 +78,15 @@ def precompute_x(
     model: str,
     api_base: str,
     tokenizer,
-    k: int = 20,
+    k: int = 0,
     tools: list | None = None,
 ) -> XLogprobs | None:
     """
     Pre-compute x-context logprobs for a fixed (trajectory, continuation) pair.
+
+    k is the number of top-k alternatives requested per position; only
+    token_logprobs (the realized token) is read, so k=0 is correct. It must not
+    be None — that suppresses token_logprobs too.
 
     Makes 2 API calls (context length + full scoring). The result can be
     reused across all group_size summaries for the same trajectory, avoiding
@@ -70,7 +97,7 @@ def precompute_x(
 
     base = api_base.rstrip("/")
     vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
-    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True, tools=tools))
+    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True, tools=tools), completion)
 
     n_x_ctx = len(tokenizer.encode(x_text))
 
@@ -93,7 +120,7 @@ def score_completion_z(
     model: str,
     api_base: str,
     tokenizer,
-    k: int = 20,
+    k: int = 0,
     tools: list | None = None,
 ) -> list[float] | None:
     """
@@ -107,7 +134,7 @@ def score_completion_z(
 
     base = api_base.rstrip("/")
     vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
-    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True, tools=tools))
+    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True, tools=tools), completion)
 
     n_z_ctx = len(tokenizer.encode(z_text))
 
@@ -136,7 +163,7 @@ def score_completion(
     model: str,
     api_base: str,
     tokenizer,
-    k: int = 20,
+    k: int = 0,
 ) -> list[float] | None:
     """
     Per-position realized-token distortion d_t = log p_x(y_t) − log p_z(y_t).
@@ -157,8 +184,8 @@ def score_completion(
 
     base = api_base.rstrip("/")
     vllm_model = model.replace("litellm_proxy/", "hosted_vllm/")
-    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True))
-    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True))
+    x_text = _close_think_block(tokenizer.apply_chat_template(x_messages, tokenize=False, add_generation_prompt=True), completion)
+    z_text = _close_think_block(tokenizer.apply_chat_template(z_messages, tokenize=False, add_generation_prompt=True), completion)
 
     n_x_ctx = len(tokenizer.encode(x_text))
     n_z_ctx = len(tokenizer.encode(z_text))
