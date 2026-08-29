@@ -81,6 +81,16 @@ set -euo pipefail
 # there, since PBS starts the job in $HOME, not the submit dir. Fall back to $(pwd).
 cd "${SLURM_SUBMIT_DIR:-${PBS_O_WORKDIR:-$(pwd)}}"
 
+# Live log for tail -f DURING the run. Slurm writes logs/%j.out live already (see the
+# #SBATCH --output above), but PBS/Torque (ABCI) SPOOLS stdout and only copies it back
+# when the job ENDS -- so there's nothing to tail while it runs. Under PBS, tee all
+# output to logs/<PBS_JOBID>.out on the shared FS so you can `tail -f` it live.
+if [ -n "${PBS_JOBID:-}" ] && [ -z "${SLURM_JOB_ID:-}" ]; then
+    mkdir -p logs
+    exec > >(tee -a "logs/${PBS_JOBID}.out") 2>&1
+    echo "[log] teeing output to logs/${PBS_JOBID}.out  (tail -f it)"
+fi
+
 [ -f .env ] && . .env
 
 # BENCH: Slurm passes it positionally (`sbatch script verified` -> $1); PBS/qsub does
@@ -193,7 +203,7 @@ APPTAINER_BIN="${APPTAINER_BIN:-$(command -v apptainer || command -v singularity
 VLLM_ROCM_SIF="${VLLM_ROCM_SIF:-docker://vllm/vllm-openai-rocm:latest}"
 # CUDA/NVIDIA SIF for SERVE_BACKEND=cuda-nv (apptainer --nv). Build with
 # server/scripts/build-cuda.sh, or point at docker://vllm/vllm-openai:<ver>.
-VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-docker://vllm/vllm-openai:v0.20.2}"
+VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-docker://vllm/vllm-openai:v0.28.0}"
 ROCM_CACHE_BASE="${ROCM_CACHE_BASE:-$(pwd)}"
 # Back apptainer's session/overlay on a WRITABLE /tmp dir. hpcfund's apptainer.conf
 # declares system bind paths (e.g. /scratch) that this user can't create -> the
