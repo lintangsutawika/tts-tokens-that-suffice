@@ -10,11 +10,18 @@ dependencies = [
     "vllm==0.19.0",
     "tinker-cookbook>=0.4.2",
     "litellm>=1.89.1",
-    "mini-swe-agent>=2.4.2",
+    "mini-swe-agent>=2.4.5",
     "swebench>=4.1.0",
     "swesmith>=0.0.8",
     "datasets>=3.0.0",
     "matplotlib>=3.11.0",
+    # Downstream agent-eval driver (Harbor + Modal env). Core dependency so a plain
+    # `uv sync` provides `harbor` with no extra flag (harbor_eval.sh finds
+    # .venv/bin/harbor). From git main, not the PyPI dev nightly (source pin in
+    # [tool.uv.sources]). Harbor needs Python >=3.12; the marker keeps the project's
+    # requires-python (>=3.11) floor valid so a 3.11 resolve just omits harbor
+    # (uv lock would otherwise fail). On 3.12/3.13 (what we run) it installs.
+    "harbor[modal]; python_version >= '3.12'",
 ]
 
 [project.optional-dependencies]
@@ -30,3 +37,7 @@ where = ["src"]
 concurrent-downloads = 10
 concurrent-builds = 4
 concurrent-installs = 4
+
+[tool.uv.sources]
+# Install Harbor from git main, not the PyPI dev nightly (0.22.x.devN).
+harbor = { git = "https://github.com/harbor-framework/harbor.git", branch = "main" }
