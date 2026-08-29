@@ -1,0 +1,24 @@
+# mini-swe-agent sampling for openai/gpt-oss-120b (117B-A5.1B MXFP4 MoE).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+#
+# Sampling: gpt-oss is run at temperature 1.0 / top_p 1.0 (OpenAI's default for the
+# gpt-oss series; the model card states no other numbers). drop_params passes these
+# through the openai provider.
+#
+# !! gpt-oss is a DIFFERENT serving path than Qwen/GLM -- do not assume the sbatch's
+# defaults work. Two things must be handled before this model produces valid eval:
+#   1. HARMONY FORMAT is mandatory: gpt-oss only works with the harmony response
+#      format (https://github.com/openai/harmony). vLLM applies it via the model's
+#      chat template automatically, but tool-call parsing is harmony-specific -- the
+#      qwen3_coder / glm47 parsers do NOT apply. Confirm the correct vLLM gpt-oss
+#      tool-call handling for your vLLM build before running (see memory:
+#      vllm-tool-parser-gotcha) -- a wrong parser silently zeroes the eval.
+#   2. REASONING EFFORT is set via the SYSTEM PROMPT ("Reasoning: high|medium|low"),
+#      NOT a sampling param. For SWE-bench use "Reasoning: high"; this must be injected
+#      into the agent's system prompt (mini-swe-agent scaffold), not set here.
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 1.0
+    drop_params: true
