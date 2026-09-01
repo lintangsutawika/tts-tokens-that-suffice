@@ -1,0 +1,284 @@
+diff --git a/harbor/environments/singularity/singularity.py b/harbor/environments/singularity/singularity.py
+index 2167505..24ba105 100644
+--- a/harbor/environments/singularity/singularity.py
++++ b/harbor/environments/singularity/singularity.py
+@@ -67,8 +67,29 @@ class SingularityEnvironment(BaseEnvironment):
+         singularity_force_pull: Force re-pull even if cached (default False).
+         singularity_no_mount: Comma-separated mount types to suppress
+             (default "home,tmp,bind-paths"). Use "" to allow all Singularity mounts.
++        singularity_writable_sandbox: Instead of `--writable-tmpfs` on the .sif,
++            extract the image to a per-session sandbox DIRECTORY and run
++            `--fakeroot --writable <dir>` (default False). Needed on HPC nodes that
++            can't FUSE-mount SIFs under --fakeroot (no `user_allow_other` in
++            /etc/fuse.conf) and have no usable overlayfs -- there both
++            `--writable-tmpfs` and `--overlay` silently degrade to a read-only
++            rootfs. A plain directory has no squashfuse mount and needs no overlay,
++            so root-in-container writes land in the dir.  [local patch]
++        singularity_sandbox_dir: Where to build per-session sandboxes when
++            singularity_writable_sandbox is set. Defaults to node-local scratch
++            ($PBS_LOCALDIR / $SLURM_TMPDIR / $TMPDIR, else the system temp dir).
+     """
+ 
++    # Local-patchset version. Bump when patches/harbor_singularity_*.patch change so
++    # scripts/eval/harbor_eval.sh refreshes a persistent venv carrying an older copy.
++    _HB_LOCAL_PATCHSET = "6"
++
++    # Throttle concurrent `singularity pull`s across all trials in this process. Many
++    # simultaneous pulls race the shared OCI blob cache ("unexpected end of JSON input"
++    # / "conveyor failed to get") and burst Docker Hub's rate limit. Agent concurrency
++    # stays at N_CONCURRENT -- only image pulls are limited. Tune via HB_SINGULARITY_MAX_PULLS.
++    _PULL_SEMAPHORE = asyncio.Semaphore(int(os.environ.get("HB_SINGULARITY_MAX_PULLS", "4")))
++
+     def __init__(
+         self,
+         environment_dir: Path,
+@@ -80,15 +101,19 @@ class SingularityEnvironment(BaseEnvironment):
+         singularity_image_cache_dir: Path | str | None = None,
+         singularity_force_pull: bool = False,
+         singularity_no_mount: str | None = None,
++        singularity_writable_sandbox: bool = False,
++        singularity_sandbox_dir: Path | str | None = None,
+         **kwargs,
+     ):
+         if singularity_image_cache_dir:
+             self._image_cache_dir = Path(singularity_image_cache_dir)
+         else:
+-            self._image_cache_dir = Path(tempfile.mkdtemp(prefix="singularity_cache_"))
++            self._image_cache_dir = self._default_image_cache_dir()
+ 
+         self._force_pull = singularity_force_pull
+         self._singularity_no_mount = singularity_no_mount
++        self._writable_sandbox = singularity_writable_sandbox
++        self._sandbox_dir_root = singularity_sandbox_dir
+ 
+         super().__init__(
+             environment_dir=environment_dir,
+@@ -104,6 +129,7 @@ class SingularityEnvironment(BaseEnvironment):
+         self._server_port: int | None = None
+         self._staging_dir: Path | None = None
+         self._sif_path: Path | None = None
++        self._sandbox_path: Path | None = None
+         self._stream_task: asyncio.Task[None] | None = None
+         self._memory_watchdog_task: asyncio.Task[None] | None = None
+         self._http_client: httpx.AsyncClient | None = None
+@@ -283,19 +309,42 @@ class SingularityEnvironment(BaseEnvironment):
+                 f"docker://{docker_image}",
+             ]
+ 
+-            process = await asyncio.create_subprocess_exec(
+-                *cmd,
+-                stdout=asyncio.subprocess.PIPE,
+-                stderr=asyncio.subprocess.PIPE,
+-            )
+-
+-            stdout, stderr = await process.communicate()
+-
+-            if process.returncode != 0:
+-                if tmp_sif_path.exists():
+-                    tmp_sif_path.unlink()
+-                error_msg = stderr.decode(errors="replace")
+-                raise RuntimeError(f"Failed to convert Docker image: {error_msg}")
++            # Retry with backoff: `singularity pull` against Docker Hub is flaky under
++            # concurrency -- rate limits and OCI-cache contention surface as transient
++            # "unexpected end of JSON input" / "conveyor failed to get" failures. One
++            # hiccup otherwise fails the whole trial. Bounded retries recover it.
++            # [local patch]
++            _MAX_PULL_ATTEMPTS = 5
++            error_msg = ""
++            # Throttle concurrent pulls process-wide (see _PULL_SEMAPHORE).
++            async with type(self)._PULL_SEMAPHORE:
++                for _attempt in range(_MAX_PULL_ATTEMPTS):
++                    if _attempt:
++                        _delay = min(5 * (2 ** (_attempt - 1)), 60)
++                        self.logger.warning(
++                            f"singularity pull of {docker_image} failed "
++                            f"(attempt {_attempt}/{_MAX_PULL_ATTEMPTS}), retrying in "
++                            f"{_delay}s: {error_msg.strip()[-200:]}"
++                        )
++                        await asyncio.sleep(_delay)
++                    if tmp_sif_path.exists():
++                        tmp_sif_path.unlink()
++                    process = await asyncio.create_subprocess_exec(
++                        *cmd,
++                        stdout=asyncio.subprocess.PIPE,
++                        stderr=asyncio.subprocess.PIPE,
++                    )
++                    stdout, stderr = await process.communicate()
++                    if process.returncode == 0:
++                        break
++                    error_msg = stderr.decode(errors="replace")
++                else:
++                    if tmp_sif_path.exists():
++                        tmp_sif_path.unlink()
++                    raise RuntimeError(
++                        f"Failed to convert Docker image after "
++                        f"{_MAX_PULL_ATTEMPTS} attempts: {error_msg}"
++                    )
+ 
+             tmp_sif_path.rename(sif_path)
+ 
+@@ -305,6 +354,81 @@ class SingularityEnvironment(BaseEnvironment):
+             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+             lock_file.close()
+ 
++    def _default_image_cache_dir(self) -> Path:
++        """Cache dir when none is passed. Node-local ($PBS_LOCALDIR/$SLURM_TMPDIR),
++        resolved LIVE per process so it is never a stale absolute path baked into a
++        job config across chunked resumes (unlike a value passed via --ek). Shared
++        by all trials in the job. Falls back to a private temp dir off-cluster.
++        [local patch]"""
++        for var in ("PBS_LOCALDIR", "SLURM_TMPDIR", "TMPDIR"):
++            val = os.environ.get(var)
++            if val:
++                return Path(val) / "harbor_sif_cache"
++        return Path(tempfile.mkdtemp(prefix="singularity_cache_"))
++
++    def _sandbox_root(self) -> Path:
++        """Node-local dir to build per-session sandboxes in.  [local patch]"""
++        if self._sandbox_dir_root:
++            return Path(self._sandbox_dir_root)
++        for var in ("PBS_LOCALDIR", "SLURM_TMPDIR", "TMPDIR"):
++            val = os.environ.get(var)
++            if val:
++                return Path(val)
++        return Path(tempfile.gettempdir())
++
++    async def _build_writable_sandbox(self, sif_path: Path) -> Path:
++        """Extract the .sif into a per-session writable sandbox directory.
++
++        `--fix-perms` gives the owner rwX on every entry so the tree can be
++        removed later (a plain sandbox keeps root-owned, unremovable files).
++        Runs `singularity build --sandbox`, which extracts (no FUSE mount), so
++        it is unaffected by the missing `user_allow_other`.  [local patch]
++        """
++        root = self._sandbox_root()
++        root.mkdir(parents=True, exist_ok=True)
++        sandbox = root / f"hbsbx_{self.session_id}"
++        await self._remove_sandbox(sandbox)
++        cmd = [
++            "singularity",
++            "build",
++            "--fix-perms",
++            "--sandbox",
++            str(sandbox),
++            str(sif_path),
++        ]
++        self.logger.debug(f"Building writable sandbox: {' '.join(cmd)}")
++        process = await asyncio.create_subprocess_exec(
++            *cmd,
++            stdout=asyncio.subprocess.PIPE,
++            stderr=asyncio.subprocess.PIPE,
++        )
++        stdout, stderr = await process.communicate()
++        if process.returncode != 0:
++            raise RuntimeError(
++                f"Failed to build writable sandbox from {sif_path}: "
++                f"{stderr.decode(errors='replace')}"
++            )
++        return sandbox
++
++    async def _remove_sandbox(self, sandbox: Path | None) -> None:
++        """Best-effort removal of a sandbox dir. Node-local scratch is job-scoped
++        and reclaimed at job end, so leftovers are not fatal.  [local patch]"""
++        if not sandbox or not sandbox.exists():
++            return
++        try:
++            proc = await asyncio.create_subprocess_exec(
++                "chmod",
++                "-R",
++                "u+rwX",
++                str(sandbox),
++                stdout=asyncio.subprocess.DEVNULL,
++                stderr=asyncio.subprocess.DEVNULL,
++            )
++            await proc.wait()
++        except Exception:
++            pass
++        shutil.rmtree(sandbox, ignore_errors=True)
++
+     async def _cleanup_server_resources(self) -> None:
+         """Clean up any existing server resources from a previous run."""
+         if (
+@@ -405,18 +529,41 @@ class SingularityEnvironment(BaseEnvironment):
+                 "--workdir",
+                 self._workdir,
+             ]
++            # Writable rootfs: a per-session sandbox DIR + `--writable` (no FUSE
++            # mount, no overlayfs) where the host can't FUSE-mount SIFs under
++            # --fakeroot; otherwise the default overlay tmpfs on the .sif.
++            if self._writable_sandbox and self._sandbox_path is not None:
++                writable_args = ["--writable"]
++                image_arg = str(self._sandbox_path)
++                # --writable can't auto-create bind destinations (no overlay/underlay
++                # to inject mountpoints), so every -B target -- and --pwd -- must
++                # already exist in the sandbox. Pre-create them.  [local patch]
++                _dests = [self._workdir]
++                for _j in range(1, len(bind_mounts), 2):
++                    _spec = bind_mounts[_j]
++                    _dst = _spec.split(":", 1)[1] if ":" in _spec else _spec
++                    _dst = _dst.split(":", 1)[0]  # drop any :ro/:rw option
++                    _dests.append(_dst)
++                for _dst in _dests:
++                    if _dst.startswith("/"):
++                        (self._sandbox_path / _dst.lstrip("/")).mkdir(
++                            parents=True, exist_ok=True
++                        )
++            else:
++                writable_args = ["--writable-tmpfs"]
++                image_arg = str(self._sif_path)
+             cmd = [
+                 "singularity",
+                 "exec",
+                 *no_mount_args,
+                 "--pwd",
+                 self._workdir,
+-                "--writable-tmpfs",
++                *writable_args,
+                 "--fakeroot",
+                 "--containall",
+                 "--pid",
+                 *bind_mounts,
+-                str(self._sif_path),
++                image_arg,
+                 *bootstrap_cmd,
+             ]
+ 
+@@ -688,6 +835,9 @@ class SingularityEnvironment(BaseEnvironment):
+                 self._docker_image, force_pull=force_pull
+             )
+ 
++        if self._writable_sandbox:
++            self._sandbox_path = await self._build_writable_sandbox(self._sif_path)
++
+         await self._start_server()
+ 
+         await self._upload_environment_dir_after_start()
+@@ -738,6 +888,12 @@ class SingularityEnvironment(BaseEnvironment):
+         if self._staging_dir and self._staging_dir.exists():
+             shutil.rmtree(self._staging_dir, ignore_errors=True)
+ 
++        # Per-session sandbox is scratch (not the shared .sif cache) -- always
++        # remove it so node-local storage doesn't fill across many tasks.
++        if self._sandbox_path is not None:
++            await self._remove_sandbox(self._sandbox_path)
++            self._sandbox_path = None
++
+         if delete:
+             self.logger.debug(
+                 f"Singularity image preserved at {self._sif_path} for reuse"
+@@ -770,7 +926,14 @@ class SingularityEnvironment(BaseEnvironment):
+         merged_env = self._merge_env(env)
+ 
+         try:
+-            _DEFAULT_HTTP_TIMEOUT = 600
++            # mini-swe-agent runs its WHOLE loop as a single exec (no timeout_sec),
++            # so a 600s client cap kills long agent runs well under the trial's real
++            # AGENT budget (enforced by an outer asyncio.wait_for). Default to a large
++            # value so the outer budget governs; override via HB_SINGULARITY_HTTP_TIMEOUT.
++            # [local patch]
++            _DEFAULT_HTTP_TIMEOUT = int(
++                os.environ.get("HB_SINGULARITY_HTTP_TIMEOUT", "86400")
++            )
+             http_timeout = (
+                 (timeout_sec + 10) if timeout_sec is not None else _DEFAULT_HTTP_TIMEOUT
+             )

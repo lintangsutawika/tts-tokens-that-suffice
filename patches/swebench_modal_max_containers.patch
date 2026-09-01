@@ -1,0 +1,12 @@
+diff --git a/swebench/harness/modal_eval/run_evaluation_modal.py b/swebench/harness/modal_eval/run_evaluation_modal.py
+index e302970..93fc51e 100644
+--- a/swebench/harness/modal_eval/run_evaluation_modal.py
++++ b/swebench/harness/modal_eval/run_evaluation_modal.py
+@@ -228,6 +228,7 @@ def get_log_dir(pred: dict, run_id: str, instance_id: str) -> Path:
+     ),
+     timeout=120
+     * 60,  # Much larger than default timeout to account for image build time
++    max_containers=32,  # Local patch (see patches/): cap parallel eval containers
+     include_source=True,
+ )
+ def run_instance_modal(
