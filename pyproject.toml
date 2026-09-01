@@ -10,7 +10,10 @@ dependencies = [
     "vllm==0.19.0",
     "tinker-cookbook>=0.4.2",
     "litellm>=1.89.1",
-    "mini-swe-agent>=2.4.5",
+    # [full] (not [modal]!) is what pulls swe-rex, which the swerex_modal environment
+    # imports. [modal] alone gives only modal+boto3 -> swerex_modal fails to load with a
+    # misleading "Unknown environment type: swerex_modal".
+    "mini-swe-agent[full]>=2.4.5",
     "swebench>=4.1.0",
     "swesmith>=0.0.8",
     "datasets>=3.0.0",
@@ -22,6 +25,10 @@ dependencies = [
     # requires-python (>=3.11) floor valid so a 3.11 resolve just omits harbor
     # (uv lock would otherwise fail). On 3.12/3.13 (what we run) it installs.
     "harbor[modal]; python_version >= '3.12'",
+    # Eval progress -> Weights & Biases (scripts/eval/wandb_monitor.py polls the job
+    # dir and logs completed/errored/mean_reward + per-error-type counts). Harbor has
+    # no native tracker integration; core dep so `uv sync` provides it.
+    "wandb>=0.18.0",
 ]
 
 [project.optional-dependencies]
@@ -39,5 +46,12 @@ concurrent-builds = 4
 concurrent-installs = 4
 
 [tool.uv.sources]
-# Install Harbor from git main, not the PyPI dev nightly (0.22.x.devN).
-harbor = { git = "https://github.com/harbor-framework/harbor.git", branch = "main" }
+# Install Harbor from git, not the PyPI dev nightly (0.22.x.devN). PINNED to an exact
+# commit (not branch=main): harbor's job lock.json carries a schema_version that is part
+# of JobLock equality, so a `uv lock`/`uv sync --upgrade` that walks main forward on ONE
+# cluster bumps the schema and makes `harbor job resume` reject job dirs created (or
+# synced) under the older harbor -> "lock.json does not match the resolved job lock".
+# Pinning keeps every cluster on the same harbor so resumes reconcile. To upgrade
+# deliberately: bump this rev, `uv lock`, re-`uv sync` EVERY cluster, then only start
+# FRESH runs on the new version (don't resume across the bump).
+harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c20710c362ef806c5d5d18852f95b21ca34b" }
