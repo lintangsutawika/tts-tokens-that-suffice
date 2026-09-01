@@ -1,6 +1,20 @@
 {
-    "trainer.placement.policy_num_gpus_per_node": 8,
-    "generator.inference_engine.num_engines": 8,
+    "trainer.log_path": "/ray_tmp/skyrl-logs",
+    "trainer.policy.model.lora.lora_sync_path": "/ray_tmp/skyrl_lora_sync",
+    "trainer.policy.megatron_config.lora_config.merge_lora": false,
+    "trainer.policy.megatron_config.tensor_model_parallel_size": 2,
+    "trainer.policy.megatron_config.pipeline_model_parallel_size": 1,
+    "trainer.placement.colocate_all": true,
+    "trainer.placement.policy_num_gpus_per_node": 4,
+    "generator.inference_engine.num_engines": 4,
+    "generator.inference_engine.tensor_parallel_size": 1,
+    "generator.inference_engine.gpu_memory_utilization": 0.45,
+    "generator.inference_engine.engine_init_kwargs": {"max_model_len": 32768, "enforce_eager": true},
+    "generator.inference_engine.max_num_seqs": 256,
     "trainer.micro_forward_batch_size_per_gpu": 1,
-    "trainer.micro_train_batch_size_per_gpu": 1
+    "trainer.micro_train_batch_size_per_gpu": 1,
+    "trainer.fused_lm_head_logprob": true,
+    "trainer.policy.language_model_only": true,
+    "trainer.ref.language_model_only": true,
+    "generator.inference_engine.language_model_only": true
 }
