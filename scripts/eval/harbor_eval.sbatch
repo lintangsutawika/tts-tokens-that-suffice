@@ -40,8 +40,9 @@
 # set VLLM_PUBLIC_HOST to a routable address, or front the vLLM with your proxy
 # and pass DELIBERATOR_BASE_URL instead.
 #
-# Serving backend (SERVE_BACKEND): cuda (NVIDIA, default) | rocm-mi300 (gfx942) |
-# rocm-mi250 (gfx90a). The ROCm variants serve inside the apptainer --rocm vLLM
+# Serving backend (SERVE_BACKEND): cuda (NVIDIA, default) | cuda-nv | rocm-mi300
+# (gfx942) | rocm-mi250 (gfx90a) | llama-cpp (GGUF quants via llama-server).
+# The ROCm variants serve inside the apptainer --rocm vLLM
 # container; submit them with the AMD cluster's own SBATCH flags (they override
 # the NVIDIA header below) and point VLLM_ROCM_SIF at a local .sif on batch nodes.
 #
@@ -170,6 +171,17 @@ if c.get("spec_config"):
     emit("SPEC_CONFIG", json.dumps(c["spec_config"], separators=(",", ":")))
 if c.get("max_model_len"):
     emit("MAX_MODEL_LEN", str(c["max_model_len"]))
+# llama.cpp (SERVE_BACKEND=llama-cpp): GGUF serve flags for llama-server. The sbatch
+# owns --host/--port/--alias, so those must NOT appear here. The quant is picked by
+# QUANT (env wins, else the JSON's "quant"): any "{QUANT}" token in the args -- e.g.
+# in "-hf repo:{QUANT}" -- is substituted, so QUANT=UD-Q4_K_XL selects a quant without
+# editing this file.
+if isinstance(c.get("llama_server_args"), list):
+    quant = os.environ.get("QUANT") or c.get("quant") or ""
+    args = " ".join(str(a) for a in c["llama_server_args"])
+    if quant:
+        args = args.replace("{QUANT}", quant)
+    emit("LLAMA_SERVER_ARGS", args)
 PY
 )"
 elif [ "${SERVE_VLLM:-}" = "1" ] && [ -z "${VLLM_EXTRA_ARGS:-}" ]; then
@@ -190,8 +202,17 @@ VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
 #   cuda-nv     -> apptainer --nv from VLLM_CUDA_SIF (NVIDIA container, e.g. H100/H200)
 #   rocm-mi300  -> apptainer --rocm on MI300X/gfx942 (AITER + FP8 MFMA + ROCM_AITER_FA)
 #   rocm-mi250  -> apptainer --rocm on MI250X/gfx90a (Triton FA; no AITER/FP8-MFMA)
+#   llama-cpp   -> apptainer --nv from LLAMA_CPP_SIF (llama-server, GGUF quants; the
+#                  serve flags come from serve/models/<repo>.json's llama_server_args)
 # The two ROCm variants mirror scripts/serve/vllm-MI300.sh / vllm-MI250.sh.
 SERVE_BACKEND="${SERVE_BACKEND:-cuda}"
+# Startup /health poll budget (tries x 5s). vLLM loads in minutes; a first-run
+# llama-cpp `-hf` pull of a ~93 GB GGUF can take much longer, so give it a wider
+# window by default (bind a persistent HF_HOME to make later runs load-only).
+case "${SERVE_BACKEND}" in
+  llama-cpp) SERVE_READY_TRIES="${SERVE_READY_TRIES:-720}" ;;  # ~60 min
+  *)         SERVE_READY_TRIES="${SERVE_READY_TRIES:-180}" ;;  # ~15 min
+esac
 DATA_PARALLEL="${DATA_PARALLEL:-1}"   # ROCm FP8 fits per-GPU: set DP=8 TP=1 there
 # ROCm-only knobs. On batch nodes point VLLM_ROCM_SIF at a LOCAL .sif (a compute
 # node may have no registry access); ROCM_CACHE_BASE holds the container binds.
@@ -204,6 +225,11 @@ VLLM_ROCM_SIF="${VLLM_ROCM_SIF:-docker://vllm/vllm-openai-rocm:latest}"
 # CUDA/NVIDIA SIF for SERVE_BACKEND=cuda-nv (apptainer --nv). Build with
 # server/scripts/build-cuda.sh, or point at docker://vllm/vllm-openai:<ver>.
 VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-docker://vllm/vllm-openai:v0.28.0}"
+# llama.cpp server SIF for SERVE_BACKEND=llama-cpp (apptainer --nv). Build with
+# server/scripts/build-llama-cpp.sh; the :server-cuda tag is the GPU-offload image
+# (plain :server is CPU-only). On a compute node with no registry access, point this
+# at a LOCAL .sif.
+LLAMA_CPP_SIF="${LLAMA_CPP_SIF:-docker://ghcr.io/ggml-org/llama.cpp:server-cuda}"
 ROCM_CACHE_BASE="${ROCM_CACHE_BASE:-$(pwd)}"
 # Back apptainer's session/overlay on a WRITABLE /tmp dir. hpcfund's apptainer.conf
 # declares system bind paths (e.g. /scratch) that this user can't create -> the
@@ -238,6 +264,26 @@ RELAY_SECRET="${RELAY_SECRET:-}"
 # the job config comes back live and `harbor run --job-name <same>` / `harbor job
 # resume -p` both work. AUTHORITATIVE: overrides any inherited RELAY_URL.
 EPHEMERAL_RELAY="${EPHEMERAL_RELAY:-0}"
+
+# The relay exists ONLY so a Modal sandbox (no inbound route) can reach this node's
+# vLLM. On-node backends (singularity/podman/docker/...) run the task container ON
+# this node, so the agent reaches the local vLLM directly via VLLM_PUBLIC_HOST -- the
+# relay is pointless indirection there, and if RELAY_URL is inherited from .env's
+# shared neulab relay it WRONGLY overrides the direct URL (and, being a singleton,
+# makes concurrent on-node jobs steal each other's traffic). So force it off unless
+# the backend is Modal. Set ENV=modal (or explicitly pass RELAY_URL with ENV=modal)
+# to use a relay on purpose.
+case "${ENV:-modal}" in
+    modal*) ;;
+    *)
+        if [ -n "${RELAY_URL}" ] || [ "${EPHEMERAL_RELAY}" = "1" ]; then
+            echo "[relay] ENV=${ENV:-modal} runs on-node -> ignoring relay" \
+                 "(RELAY_URL='${RELAY_URL}', EPHEMERAL_RELAY=${EPHEMERAL_RELAY}); agent uses the direct node URL" >&2
+        fi
+        RELAY_URL=""
+        EPHEMERAL_RELAY=0
+        ;;
+esac
 # Extra vLLM flags (parsers etc.). Keep --tool-call-parser qwen3_coder for Qwen
 # (hermes silently drops the <function=..> XML tool calls -> RepeatedFormatError).
 # DO NOT add --reasoning-parser qwen3 for the AGENT server. Proven at the raw-
@@ -256,6 +302,7 @@ VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:---enable-chunked-prefill --max-num-batched-t
 VLLM_PID=""
 BRIDGE_PID=""
 HARBOR_PID=""       # the backgrounded harbor_eval.sh (execs into harbor)
+WANDB_MONITOR_PID="" # the backgrounded wandb progress poller (WANDB_MONITOR=1)
 RELAY_APP_NAME=""   # set only when EPHEMERAL_RELAY deploys a per-job relay app
 _CLEANED_UP=0
 cleanup() {
@@ -290,6 +337,10 @@ cleanup() {
             uv run --with modal modal app stop -y "${RELAY_APP_NAME}" </dev/null 2>/dev/null || true
         fi
     fi
+    # wandb poller: a non-billable read-only observer. Let it log one FINAL snapshot
+    # (it also self-exits when the job's result.json gets finished_at) then stop it.
+    [ -n "${WANDB_MONITOR_PID}" ] && { echo "[cleanup] stopping wandb monitor (pid=${WANDB_MONITOR_PID})";
+        kill "${WANDB_MONITOR_PID}" 2>/dev/null; }
     [ -n "${BRIDGE_PID}" ] && { echo "[cleanup] stopping relay bridge (pid=${BRIDGE_PID})";
         kill "${BRIDGE_PID}" 2>/dev/null; }
     [ -n "${VLLM_PID}" ] && { echo "[cleanup] stopping vLLM (pid=${VLLM_PID})";
@@ -308,7 +359,7 @@ if [ "${SERVE_VLLM}" = "1" ]; then
     # entry and dies on a 'GPU-<uuid>'. For the NVIDIA backends, rewrite it to integer
     # indices 0..N-1 (correct on a full-node allocation). No-op if already numeric/unset.
     case "${SERVE_BACKEND}" in
-      cuda|cuda-nv)
+      cuda|cuda-nv|llama-cpp)
         if printf '%s' "${CUDA_VISIBLE_DEVICES:-}" | grep -q '[^0-9,]'; then
             _NGPU=$(printf '%s' "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .)
             export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((_NGPU - 1)))"
@@ -432,25 +483,62 @@ if [ "${SERVE_VLLM}" = "1" ]; then
                 "${ROCM_SERVE_EXTRA[@]}" "${SPEC_ARGS[@]}" ${VLLM_EXTRA_ARGS} &
         VLLM_PID=$!
         ;;
+      llama-cpp)
+        # GGUF quants (e.g. unsloth/GLM-5.3-Flash-GGUF) via llama.cpp's llama-server
+        # inside the CUDA container (apptainer --nv) from LLAMA_CPP_SIF
+        # (server/scripts/build-llama-cpp.sh). NOT vLLM: the serve flags are
+        # LLAMA_SERVER_ARGS from serve/models/<repo>.json's llama_server_args (-hf,
+        # -ngl, -c, --jinja, ...). This sbatch owns --host/--port/--alias so the port
+        # matches the dynamically-picked VLLM_PORT and /v1/models advertises the name
+        # harbor calls it by. TP/DP don't apply (llama.cpp splits the GGUF across the
+        # visible GPUs itself via -ngl). --jinja (in the JSON args) loads the model's
+        # chat template so tool calls parse -- verify they actually do (the llama.cpp
+        # analogue of the vLLM tool-parser gotcha).
+        if [ -z "${LLAMA_SERVER_ARGS:-}" ]; then
+            echo "ERROR: SERVE_BACKEND=llama-cpp but no LLAMA_SERVER_ARGS (need" \
+                 "serve/models/${VLLM_MODEL}.json with llama_server_args, or set it)" >&2
+            exit 2
+        fi
+        mkdir -p "${ROCM_CACHE_BASE}/hf_cache" "${ROCM_CACHE_BASE}/tmp" "${APPTAINER_TMPDIR}"
+        # Set both prefixes: apptainer reads APPTAINER_TMPDIR, singularity SINGULARITY_TMPDIR.
+        export APPTAINER_TMPDIR SINGULARITY_TMPDIR="${APPTAINER_TMPDIR}"
+        "${APPTAINER_BIN}" exec --nv --writable-tmpfs \
+            --workdir "${APPTAINER_TMPDIR}" \
+            --bind "${ROCM_CACHE_BASE}/hf_cache:/root/.cache/huggingface" \
+            --bind "${ROCM_CACHE_BASE}/tmp:/tmp_work" \
+            --env TMPDIR=/tmp_work \
+            --env HF_HOME=/root/.cache/huggingface \
+            --env "HF_TOKEN=${HF_TOKEN:-}" \
+            --env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}" \
+            ${APPTAINER_ARGS:-} \
+            "${LLAMA_CPP_SIF}" \
+            llama-server ${LLAMA_SERVER_ARGS} \
+                --host 0.0.0.0 \
+                --port "${VLLM_PORT}" \
+                --alias "${VLLM_MODEL}" &
+        VLLM_PID=$!
+        ;;
       *)
-        echo "ERROR: unknown SERVE_BACKEND '${SERVE_BACKEND}' (want cuda|cuda-nv|rocm-mi300|rocm-mi250)" >&2
+        echo "ERROR: unknown SERVE_BACKEND '${SERVE_BACKEND}'" \
+             "(want cuda|cuda-nv|rocm-mi300|rocm-mi250|llama-cpp)" >&2
         exit 2
         ;;
     esac
 
-    echo "[serve] waiting for vLLM /health on :${VLLM_PORT} ..."
+    echo "[serve] waiting for ${SERVE_BACKEND} /health on :${VLLM_PORT}" \
+         "(up to $((SERVE_READY_TRIES * 5))s) ..."
     READY=0
-    for _ in $(seq 1 180); do
+    for _ in $(seq 1 "${SERVE_READY_TRIES}"); do
         if ! kill -0 "${VLLM_PID}" 2>/dev/null; then
-            echo "ERROR: vLLM process exited during startup" >&2; exit 1
+            echo "ERROR: serve process exited during startup" >&2; exit 1
         fi
         if curl -sf "http://127.0.0.1:${VLLM_PORT}/health" >/dev/null 2>&1; then
             READY=1; break
         fi
         sleep 5
     done
-    [ "${READY}" = "1" ] || { echo "ERROR: vLLM not ready after 900s" >&2; exit 1; }
-    echo "[serve] vLLM ready."
+    [ "${READY}" = "1" ] || { echo "ERROR: server not ready after $((SERVE_READY_TRIES * 5))s" >&2; exit 1; }
+    echo "[serve] ${SERVE_BACKEND} ready."
 
     # MODEL is already the bare HF repo (model block above) and exported; harbor_eval.sh
     # adds the openai/ litellm prefix. Kept here as a no-op guard for a bare invocation.
@@ -580,6 +668,26 @@ echo "=================================================================="
 # trap while harbor is still a killable child: cleanup SIGINTs it for a graceful,
 # resumable checkpoint. `|| true` so harbor's non-zero exit (or our kill) doesn't trip
 # `set -e` before the EXIT trap runs.
+# Optional live progress -> Weights & Biases. Opt in with WANDB_MONITOR=1 (and a
+# WANDB_API_KEY in env). scripts/eval/wandb_monitor.py polls the job dir off the shared
+# FS -- independent of harbor -- and logs completed/errored/mean_reward + per-error-type
+# counts, so batch runs self-report despite harbor's TTY-gated bar. It tolerates the job
+# dir not existing yet (harbor creates it) and self-exits when the job finishes. Uses the
+# project venv's python (where `uv sync` installs wandb), matching the .venv/bin/* style.
+if [ "${WANDB_MONITOR:-0}" = "1" ]; then
+    if [ -n "${WANDB_API_KEY:-}" ]; then
+        _MON_PY=".venv/bin/python"; [ -x "${_MON_PY}" ] || _MON_PY="python3"
+        echo "[monitor] wandb progress: project=${WANDB_PROJECT:-harbor-eval} run=${JOB_NAME}"
+        "${_MON_PY}" scripts/eval/wandb_monitor.py "${JOBS_DIR:-jobs}/${JOB_NAME}" \
+            --interval "${WANDB_MONITOR_INTERVAL:-60}" \
+            --project "${WANDB_PROJECT:-harbor-eval}" \
+            --name "${JOB_NAME}" &
+        WANDB_MONITOR_PID=$!
+    else
+        echo "[monitor] WANDB_MONITOR=1 but WANDB_API_KEY is unset -> skipping wandb monitor" >&2
+    fi
+fi
+
 bash scripts/eval/harbor_eval.sh "${BENCH}" &
 HARBOR_PID=$!
 wait "${HARBOR_PID}" || true
