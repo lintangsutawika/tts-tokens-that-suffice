@@ -64,7 +64,7 @@ From: $BASE_SIF
     # Pin the ROCm torch so nothing downgrades it to a CUDA build. The
     # +rocm7.2 local version only exists on the PyTorch ROCm index, so every
     # install below carries the extra index + this constraint.
-    printf 'torch==2.11.0+rocm7.2\ntorchvision==0.26.0+rocm7.2\ncausal-conv1d==1.4.0\ntinker==0.22.2\n' > /tmp/constraints.txt
+    printf 'torch==2.11.0+rocm7.2\ntorchvision==0.26.0+rocm7.2\ntinker==0.22.2\n' > /tmp/constraints.txt
     EXTRA="--extra-index-url $ROCM_INDEX --constraint /tmp/constraints.txt"
 
     # Upgrade the base torch 2.10 -> 2.11 to match vllm 0.20.2's pin.
@@ -73,26 +73,23 @@ From: $BASE_SIF
     # Ray (plain PyPI package; pinned to match SkyRL).
     \$PIP -q "ray==2.51.1" \$EXTRA
 
-    # causal_conv1d is a transitive dep that tries to build a CUDA extension.
-    # Install a no-op stub so the dependency is satisfied without compiling.
-    python3 -c "
-import os
-d = '/tmp/causal_conv1d_stub/causal_conv1d'
-os.makedirs(d, exist_ok=True)
-open(d + '/__init__.py', 'w').close()
-with open('/tmp/causal_conv1d_stub/setup.py', 'w') as f:
-    f.write(\"from setuptools import setup; setup(name='causal-conv1d', version='1.4.0', packages=['causal_conv1d'])\")
-"
-    \$PIP /tmp/causal_conv1d_stub --no-deps -q
-
     # Install SkyRL with the tinker extra only — [fsdp] pulls in CUDA-only
     # packages (flashinfer, vllm, nixl, flash-attn) that don't exist on ROCm.
     \$PIP -e /skyrl[tinker] -q \$EXTRA
 
     # Install the ROCm-compatible subset of [skyrl-train] deps manually,
-    # excluding: vllm-router, nixl (CUDA/glibc-specific).
+    # excluding nixl (CUDA/glibc-specific). vllm-router IS included: the
+    # non-colocated path (trainer.placement.colocate_all=false) routes sample
+    # requests through it, and SkyRL's vllm_router.py imports
+    # vllm_router.launch_router. It's a pure HTTP routing layer (no CUDA) and
+    # leaves the pinned torch/vllm untouched.
+    # prometheus-fastapi-instrumentator==8.0.2: vllm pulls 8.0.0, which 500s on
+    # every request to the vllm OpenAI server (started by the new inference
+    # layer in non-colocated RL) with "'_IncludedRouter' object has no attribute
+    # 'path'" — fastapi 0.116+ route objects it can't iterate. 8.0.2 handles them.
     \$PIP -q \$EXTRA \\
-        loguru tqdm ninja tensorboard func_timeout \\
+        loguru tqdm ninja tensorboard func_timeout vllm-router \\
+        "prometheus-fastapi-instrumentator==8.0.2" \\
         "hydra-core==1.3.2" accelerate torchdata omegaconf "ray==2.51.1" \\
         "peft==0.18.1" "debugpy==1.8.0" hf_transfer wandb "datasets>=4.0.0" \\
         tensordict jaxtyping skyrl-gym polars s3fs uvicorn pybind11 setuptools \\
@@ -103,6 +100,34 @@ with open('/tmp/causal_conv1d_stub/setup.py', 'w') as f:
     # builds a pure-Python wheel (no CUDA/CK compile) that works on ROCm.
     FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE \\
         \$PY -m pip install flash-attn==2.8.3 --no-build-isolation -q
+
+    # Hybrid Gated-DeltaNet models (Qwen3.5) need real causal_conv1d + fla
+    # kernels; with neither, transformers' torch fallbacks run but are slow.
+    # causal_conv1d compiles a HIP extension from source (FORCE_BUILD bypasses
+    # the prebuilt-CUDA-wheel lookup; --no-build-isolation uses the venv torch).
+    # GOTCHA (cost a crash): causal_conv1d's setup.py does NOT read
+    # PYTORCH_ROCM_ARCH on ROCm — it reads HIP_ARCHITECTURES, defaulting to
+    # "native" (the build HOST's GPU). Building on a gfx90a box without this
+    # silently bakes a gfx90a-ONLY .so that SIGSEGVs at runtime on gfx942/MI300X
+    # (no matching code object). Use a COMMA list (semicolon gets split by the
+    # shell into "--offload-arch=gfx90a" + a bogus "gfx942" command) to get a fat
+    # binary that runs on both MI250 (gfx90a) and MI300X (gfx942). ROCM_PATH must
+    # point at /opt/rocm: the base image's default /opt/rocm-7.2.0 doesn't exist,
+    # so setup.py's hipcc/HIP-version probe fails without it. Verified the .so
+    # carries both gfx90a + gfx942 code objects.
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE \\
+        ROCM_PATH=/opt/rocm \\
+        HIP_HOME=/opt/rocm \\
+        HIP_ARCHITECTURES="gfx90a,gfx942" \\
+        MAX_JOBS=32 \\
+        \$PY -m pip install --no-build-isolation --no-deps -q \\
+        "git+https://github.com/Dao-AILab/causal-conv1d.git@v1.5.0.post8"
+    # fla (flash-linear-attention) is pure Python + Triton — no compile. Its
+    # only real deps are einops + torch (already present); install --no-deps so
+    # it doesn't pull CUDA 'triton' and shadow pytorch-triton-rocm. fla-core
+    # provides the `fla` import namespace; >=0.2.2 satisfies transformers'
+    # is_flash_linear_attention_available() version gate.
+    \$PY -m pip install --no-deps -q "fla-core==0.5.1" "flash-linear-attention==0.5.1"
 
     # vllm 0.20.2 detects the ROCm platform via \`import amdsmi\`; the AMD SMI
     # python bindings ship with ROCm but aren't in the base venv. Without them
@@ -144,7 +169,10 @@ with open('/tmp/causal_conv1d_stub/setup.py', 'w') as f:
 
 %environment
     export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
-    export _SKYRL_USE_NEW_INFERENCE=0
+    # Leave _SKYRL_USE_NEW_INFERENCE at SkyRL's default (1). The new HTTP
+    # inference layer is required for the non-colocated path (it starts the
+    # vllm-router and publishes the proxy URL the tinker API forwards to);
+    # forcing it to 0 selects the legacy client that never publishes a URL.
     export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
     export RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
     # Base image sets ROCM_PATH=/opt/rocm-7.2.0 (a path that doesn't exist; the
