@@ -144,7 +144,7 @@ MODAL_SANDBOX_IDLE_TIMEOUT_SEC="${MODAL_SANDBOX_IDLE_TIMEOUT_SEC:-3600}"  # 1h i
 # namespace, so it reaches local vLLM directly). SINGULARITY_CACHE_DIR is the dir for
 # converted .sif images.
 #   * LEAVE IT UNSET (default) for node-local: it is NOT passed to harbor, and the
-#     patched backend resolves $PBS_LOCALDIR/$SLURM_TMPDIR LIVE per process. Nothing
+#     harbor-singularity-hpc backend resolves $PBS_LOCALDIR/$SLURM_TMPDIR LIVE per process. Nothing
 #     absolute is baked into the job config, so chunked RESUME on a new node works
 #     (each chunk uses its own node-local dir). Cost: wiped per job => re-pull per chunk.
 #   * SET a LITERAL shared-FS path (e.g. /home/aci18914wh/sif_cache) to PERSIST across
@@ -162,13 +162,17 @@ SINGULARITY_FORCE_PULL="${SINGULARITY_FORCE_PULL:-}"   # re-pull even if cached 
 # ("ModuleNotFoundError: No module named 'uvicorn'"). Keep bind-paths (=> resolv.conf);
 # only suppress home,tmp. Set to "" is not passable via --ek (use a real value).
 SINGULARITY_NO_MOUNT="${SINGULARITY_NO_MOUNT:-home,tmp}"
-# Writable-sandbox mode (see the patch block above): on ABCI-class nodes that can't
-# FUSE-mount SIFs under --fakeroot and lack overlayfs, extract to a per-session
-# sandbox dir + `--fakeroot --writable`. Off by default (upstream --writable-tmpfs).
-SINGULARITY_WRITABLE_SANDBOX="${SINGULARITY_WRITABLE_SANDBOX:-}"   # 1/true to enable
-# Where per-session sandboxes are built. Empty => harbor picks node-local scratch
+# Writable-sandbox mode: on ABCI-class nodes that can't FUSE-mount SIFs under --fakeroot
+# and lack overlayfs, extract to a per-session sandbox dir + `--fakeroot --writable`.
+# The harbor-singularity-hpc class defaults this ON, so LEAVE UNSET to use it. Set
+# "false" to force upstream --writable-tmpfs (e.g. a node where FUSE is configured).
+SINGULARITY_WRITABLE_SANDBOX="${SINGULARITY_WRITABLE_SANDBOX:-}"   # empty=on (class default); false to disable
+# Where per-session sandboxes are built. Empty => the class picks node-local scratch
 # ($PBS_LOCALDIR / $SLURM_TMPDIR / $TMPDIR). Keep it OFF the shared FS.
 SINGULARITY_SANDBOX_DIR="${SINGULARITY_SANDBOX_DIR:-}"
+# The writable-rootfs environment class, selected via --environment-import-path (harbor's
+# -e is a fixed enum and can't name a custom class). Override only to test a fork.
+SINGULARITY_ENV_IMPORT_PATH="${SINGULARITY_ENV_IMPORT_PATH:-harbor_singularity_hpc.environment:SingularityWritableEnvironment}"
 N_CONCURRENT="${N_CONCURRENT:-4}"  # parallel trials
 N_TASKS="${N_TASKS:-}"             # limit; empty = whole dataset
 JOBS_DIR="${JOBS_DIR:-jobs}"
@@ -218,19 +222,17 @@ else
     exit 127
 fi
 
-# --- Singularity: patch harbor so it runs the SWE-bench datasets on ABCI --------
-# Two local patches, applied IN ORDER (the 2nd is cut against the 1st):
-#   1. dockerfile_from  -> derive the image from the Dockerfile FROM (SWE-bench
-#      tasks set no [environment].docker_image, so unpatched it dies at validation).
-#   2. writable_sandbox -> extract to a per-session sandbox dir + `--fakeroot
-#      --writable` instead of `--writable-tmpfs`. ABCI can't FUSE-mount SIFs under
-#      --fakeroot (no user_allow_other) and has no overlayfs, so tmpfs/overlay give
-#      a read-only rootfs; a plain sandbox dir sidesteps both. Enabled at runtime by
-#      SINGULARITY_WRITABLE_SANDBOX=1 (the --ek below); the patch is inert otherwise.
-# The .venv persists in $HOME across jobs, so a synced patch change must UPGRADE an
-# already-patched venv -- handled below by resetting harbor to pristine when an older
-# patchset is detected. Idempotent. Only for ENV=singularity; podman/modal build the
-# Dockerfile natively.
+# --- Singularity: writable-rootfs environment via the harbor-singularity-hpc package -
+# The Singularity backend on ABCI-class nodes needs: (1) a Dockerfile FROM fallback
+# (SWE-bench tasks set no [environment].docker_image), and (2) a writable rootfs --
+# those nodes can't FUSE-mount SIFs under --fakeroot (no user_allow_other) and have no
+# overlayfs, so --writable-tmpfs/--overlay give a read-only rootfs. Both (plus pull
+# retry + a long exec timeout) now live in the `harbor-singularity-hpc` package, a
+# subclass of harbor's SingularityEnvironment selected below via
+# --environment-import-path. This replaces the old in-place source patching of harbor
+# (patches/harbor_singularity_*.patch + the pristine-reset dance): it is a normal uv
+# dependency, so a plain `uv sync` installs it and there is nothing to re-apply per job.
+# Only for ENV=singularity; podman/modal build the Dockerfile natively.
 case "${ENVIRONMENT}" in
   singularity*)
     # Pre-create the .sif cache (harbor also mkdir's it, but a stale/absent parent
@@ -243,54 +245,20 @@ case "${ENVIRONMENT}" in
         echo "WARNING: could not create SINGULARITY_CACHE_DIR=${SINGULARITY_CACHE_DIR} (bad path? stale \$PBS_LOCALDIR jobid? put the .sif cache on a shared FS)" >&2
     fi
     [ -n "${SINGULARITY_SANDBOX_DIR}" ] && mkdir -p "${SINGULARITY_SANDBOX_DIR}" 2>/dev/null
-    _RESOLVE='import harbor.environments.singularity.singularity as m;print(m.__file__)'
-    _SING_PY=""
+    # Verify the environment class is importable in the SAME interpreter harbor uses.
+    # If missing, `uv sync` (it's a pinned dependency) usually fixes it.
+    _CLS_MOD="${SINGULARITY_ENV_IMPORT_PATH%%:*}"
+    _IMPORT_CHECK="import importlib; importlib.import_module('${_CLS_MOD}')"
     if command -v uv >/dev/null 2>&1; then
-        _SING_PY="$(uv run --quiet python -c "${_RESOLVE}" 2>/dev/null)"
-    fi
-    [ -n "${_SING_PY}" ] || _SING_PY="$(.venv/bin/python -c "${_RESOLVE}" 2>/dev/null)"
-    if [ -z "${_SING_PY}" ] || [ ! -f "${_SING_PY}" ]; then
-        echo "WARNING: ENV=singularity but could not locate installed harbor to patch (module=${_SING_PY:-unresolved}); apply patches/harbor_singularity_*.patch manually." >&2
-    # Version stamp present ONLY in the CURRENT patchset (bump _HB_LOCAL_PATCHSET in the
-    # patch AND here together). Lets a persistent venv carrying an OLDER version be
-    # detected and refreshed below.
-    elif grep -q '_HB_LOCAL_PATCHSET = "6"' "${_SING_PY}"; then
-        echo "[patch] singularity patchset v6: already current"
+        uv run --quiet python -c "${_IMPORT_CHECK}" >/dev/null 2>&1 && _OK=1 || _OK=""
     else
-        _SP_DIR="${_SING_PY%/harbor/environments/singularity/singularity.py}"
-        # If a DIFFERENT (older) version of our patches is applied, a plain git-apply of
-        # the new one conflicts and the guard would skip it -- so the persistent $HOME
-        # venv would keep the stale code. Reset harbor to pristine first (re-copies from
-        # the uv cache, offline), then reapply both cleanly.
-        if grep -q '_HB_LOCAL_PATCHSET\|_build_writable_sandbox\|_docker_image_from_dockerfile\|_default_image_cache_dir' "${_SING_PY}"; then
-            echo "[patch] older singularity patchset detected -> resetting harbor to pristine"
-            if command -v uv >/dev/null 2>&1 && uv sync --reinstall-package harbor >/dev/null 2>&1; then
-                _SING_PY="$(uv run --quiet python -c "${_RESOLVE}" 2>/dev/null || echo "${_SING_PY}")"
-                _SP_DIR="${_SING_PY%/harbor/environments/singularity/singularity.py}"
-            else
-                echo "WARNING: could not reset harbor to pristine (uv sync --reinstall-package harbor); the patch upgrade may fail. Run that manually on the node." >&2
-            fi
-        fi
-        # Apply both in order (2nd is cut against the 1st). Guards skip any already present.
-        for _entry in \
-            "patches/harbor_singularity_dockerfile_from.patch:_docker_image_from_dockerfile" \
-            "patches/harbor_singularity_writable_sandbox.patch:_build_writable_sandbox"; do
-            _PATCH="${_entry%%:*}"; _SENTINEL="${_entry##*:}"
-            _LABEL="$(basename "${_PATCH}" .patch)"
-            if [ ! -f "${_PATCH}" ]; then
-                echo "WARNING: ${_PATCH} missing; ENV=singularity may fail on SWE-bench. Use ENV=podman or restore it." >&2
-            elif grep -q "${_SENTINEL}" "${_SING_PY}"; then
-                echo "[patch] ${_LABEL}: already applied"
-            else
-                _ABS_PATCH="$(cd "$(dirname "${_PATCH}")" && pwd)/$(basename "${_PATCH}")"
-                if ( cd "${_SP_DIR}" && git apply --recount "${_ABS_PATCH}" ) 2>/dev/null \
-                   || ( cd "${_SP_DIR}" && patch -p1 --forward < "${_ABS_PATCH}" ) >/dev/null 2>&1; then
-                    echo "[patch] ${_LABEL}: applied"
-                else
-                    echo "WARNING: failed to apply ${_PATCH} to ${_SING_PY}; ENV=singularity may fail on SWE-bench. Use ENV=podman or apply it manually." >&2
-                fi
-            fi
-        done
+        .venv/bin/python -c "${_IMPORT_CHECK}" >/dev/null 2>&1 && _OK=1 || _OK=""
+    fi
+    if [ -z "${_OK}" ]; then
+        echo "WARNING: ENV=singularity but '${_CLS_MOD}' is not importable. Install it: uv sync" >&2
+        echo "         (harbor-singularity-hpc is a pinned dependency; see pyproject.toml [tool.uv.sources].)" >&2
+    else
+        echo "[env] singularity: ${SINGULARITY_ENV_IMPORT_PATH}"
     fi
     ;;
 esac
@@ -301,7 +269,6 @@ ARGS=(
     -d "${DATASET}"
     -a mini-swe-agent
     -m "${LITELLM_MODEL}"
-    -e "${ENVIRONMENT}"
     -n "${N_CONCURRENT}"
     --job-name "${JOB_NAME}"
     -o "${JOBS_DIR}"
@@ -318,6 +285,16 @@ ARGS=(
     --ak "config_file=${MINI_CONFIG}"
     -y
 )
+
+# Environment selection. `singularity` is our custom writable-rootfs class from the
+# harbor-singularity-hpc package -- harbor's -e is a fixed enum and can't name a custom
+# class, so select it by import path (config.json then stores import_path, so resume
+# reloads the same class as long as the package is installed on the node). Every other
+# backend uses the built-in -e enum.
+case "${ENVIRONMENT}" in
+    singularity*) ARGS+=( --environment-import-path "${SINGULARITY_ENV_IMPORT_PATH}" ) ;;
+    *)            ARGS+=( -e "${ENVIRONMENT}" ) ;;
+esac
 
 # mini-swe-agent is installed with an unpinned `uv tool install`, which builds the
 # tool venv against the TASK IMAGE's system Python. Many SWE-bench images ship

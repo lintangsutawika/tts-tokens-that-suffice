@@ -25,6 +25,13 @@ dependencies = [
     # requires-python (>=3.11) floor valid so a 3.11 resolve just omits harbor
     # (uv lock would otherwise fail). On 3.12/3.13 (what we run) it installs.
     "harbor[modal]; python_version >= '3.12'",
+    # Writable-rootfs Singularity environment for harbor (ENV=singularity), selected by
+    # --environment-import-path in harbor_eval.sh. Replaces the old patches/harbor_singularity_*
+    # source patching: lets SWE-bench run under Singularity on FUSE-restricted PBS/SLURM
+    # nodes (writable sandbox, Dockerfile FROM fallback, pull retry, long exec timeout).
+    # Same 3.12 marker as harbor (it subclasses harbor's SingularityEnvironment). Source
+    # pinned in [tool.uv.sources].
+    "harbor-singularity-hpc; python_version >= '3.12'",
     # Eval progress -> Weights & Biases (scripts/eval/wandb_monitor.py polls the job
     # dir and logs completed/errored/mean_reward + per-error-type counts). Harbor has
     # no native tracker integration; core dep so `uv sync` provides it.
@@ -55,3 +62,8 @@ concurrent-installs = 4
 # deliberately: bump this rev, `uv lock`, re-`uv sync` EVERY cluster, then only start
 # FRESH runs on the new version (don't resume across the bump).
 harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c20710c362ef806c5d5d18852f95b21ca34b" }
+# The Singularity-on-HPC environment, pinned to an exact commit (same discipline as
+# harbor: its overrides track harbor's internals, so pin them together and bump both
+# deliberately). Its own pyproject requires harbor>=0.22,<0.23, satisfied by the git
+# harbor above (dist version 0.22.0).
+harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "91d6a3315770c51b846c782ef88488203bb27854" }

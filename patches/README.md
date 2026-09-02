@@ -5,6 +5,12 @@ these after any `uv sync` / reinstall that overwrites the affected package.
 
 ## `harbor_singularity_dockerfile_from.patch`
 
+> **SUPERSEDED (2026-09-02).** This behavior now ships in the
+> **`harbor-singularity-hpc`** package (a `SingularityEnvironment` subclass selected via
+> `--environment-import-path`), pinned as a normal `uv` dependency. `harbor_eval.sh` no
+> longer applies this patch. Kept here as the reference implementation that seeded the
+> package; do not re-apply it to the venv (it would collide with the subclass override).
+
 Lets the **Singularity** environment (`ENV=singularity`) run the SWE-bench datasets.
 Harbor's Singularity backend only pulls a named image from `task.toml`
 `[environment].docker_image`; it never builds a task's `environment/Dockerfile` (the
@@ -26,6 +32,11 @@ Only needed on the **no-podman** path — `ENV=podman` builds the Dockerfile nat
 needs no patch.
 
 ## `harbor_singularity_writable_sandbox.patch`
+
+> **SUPERSEDED (2026-09-02).** Folded into the **`harbor-singularity-hpc`** package (see
+> the note above). `harbor_eval.sh` selects that class via `--environment-import-path`
+> instead of patching harbor's source; the `_HB_LOCAL_PATCHSET` upgrade dance is gone.
+> Kept as reference only.
 
 Makes `ENV=singularity` produce a **writable** container rootfs on HPC nodes where the
 default path can't. On ABCI (and similar), `/etc/fuse.conf` lacks `user_allow_other`, so
