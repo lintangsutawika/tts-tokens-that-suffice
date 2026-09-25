@@ -1,0 +1,66 @@
+diff --git a/swebench/harness/test_spec/python.py b/swebench/harness/test_spec/python.py
+index b125ab0..0e6a30a 100644
+--- a/swebench/harness/test_spec/python.py
++++ b/swebench/harness/test_spec/python.py
+@@ -270,8 +270,18 @@ def make_repo_script_list_py(
+     """
+     branch = REPO_BASE_COMMIT_BRANCH.get(repo, {}).get(base_commit, "")
+     branch = f"--branch {branch}" if branch else ""
++    # Local patch (see patches/): REPO_BASE_COMMIT_BRANCH may reference a branch
++    # that no longer exists upstream (e.g. sympy has tag `sympy-1.7` but no
++    # branch `1.7`), which makes the `--single-branch --branch` clone fail with
++    # "Remote branch ... not found". Fall back to a full clone so `base_commit`
++    # is still fetchable; the subsequent `git reset --hard {base_commit}`,
++    # future-tag pruning and leak-check below keep the checkout clean/non-leaking.
++    clone_cmd = (
++        f"git clone -o origin {branch} --single-branch https://github.com/{repo} {repo_directory} "
++        f"|| (rm -rf {repo_directory} && git clone -o origin https://github.com/{repo} {repo_directory})"
++    )
+     setup_commands = [
+-        f"git clone -o origin {branch} --single-branch https://github.com/{repo} {repo_directory}",
++        clone_cmd,
+         f"chmod -R 777 {repo_directory}",  # So nonroot user can run tests
+         f"cd {repo_directory}",
+         f"git reset --hard {base_commit}",
+@@ -300,7 +310,40 @@ def make_repo_script_list_py(
+             setup_commands.append(pre_install)
+ 
+     if "install" in specs:
+-        setup_commands.append(specs["install"])
++        # --- SWE-bench Modal build-compat shim (local patch, see patches/) ---
++        # The Modal backend rebuilds these old-repo images from scratch with a
++        # *current* pip/setuptools, which breaks two things the original
++        # (pre-built, cached) images relied on:
++        #   1. pip removed the `--no-use-pep517` flag  -> scikit-learn's legacy
++        #      numpy.distutils build fails with "no such option: --no-use-pep517".
++        #   2. pip now requires the PEP 660 `build_editable` hook  -> plain
++        #      `pip install -e .` fails for old setuptools backends
++        #      (e.g. sympy 1.7, pylint 2.15) with "missing the 'build_editable'
++        #      hook ... Consider using a build backend that supports PEP 660".
++        # These need *opposite* pins, so shim per-repo just before install runs.
++        install_cmd = specs["install"]
++        if "--no-use-pep517" in install_cmd:
++            # Legacy numpy.distutils build (scikit-learn): pin an old pip that
++            # still has the flag and an old setuptools that still ships
++            # numpy.distutils, matching how the cached image was built.
++            setup_commands.append(
++                "python -m pip install 'pip<21.3' 'setuptools<60' wheel"
++            )
++        elif repo in {"sympy/sympy", "pylint-dev/pylint"} and "-e" in install_cmd:
++            # Editable install against an old build backend. Two parts:
++            #  * install a modern setuptools (implements the PEP 660
++            #    build_editable hook) into the env, and
++            #  * add --no-build-isolation so pip uses THAT setuptools instead of
++            #    spinning up an isolated build env that reinstalls the old,
++            #    hook-less backend pinned in the repo's pyproject.toml.
++            setup_commands.append(
++                "python -m pip install -U 'setuptools>=64' wheel"
++            )
++            if "--no-build-isolation" not in install_cmd:
++                install_cmd = install_cmd.replace(
++                    "pip install", "pip install --no-build-isolation", 1
++                )
++        setup_commands.append(install_cmd)
+ 
+     # If the setup modifies the repository in any way, it can be
+     # difficult to get a clean diff.  This ensures that `git diff`

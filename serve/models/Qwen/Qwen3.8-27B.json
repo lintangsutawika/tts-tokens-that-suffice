@@ -1,0 +1,18 @@
+{
+  "_model": "Qwen/Qwen3.8-27B",
+  "_note": "Qwen3 family. Serve with --tool-call-parser qwen3_coder and WITHOUT --reasoning-parser qwen3 (the <tool_call> is emitted before an often-omitted </think>; the reasoning parser would swallow it -> RepeatedFormatError). --language-model-only skips the multimodal vision tower. See memory: vllm-tool-parser-gotcha. Raise --max-num-batched-tokens above 4096 for N>=64 concurrent.",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--max-num-batched-tokens", "4096",
+    "--enable-prefix-caching",
+    "--long-prefill-token-threshold", "0",
+    "--enforce-eager",
+    "--enable-auto-tool-choice",
+    "--language-model-only",
+    "--tool-call-parser", "qwen3_coder"
+  ],
+  "spec_config": null,
+  "max_model_len": 262144,
+  "native_max_context": 262144,
+  "_note_context": "Served window (max_model_len) now EQUALS the model's native max_position_embeddings (262144, default RoPE theta=1e7, no scaling) -- the full native context, and the ceiling without further RoPE scaling. Costs KV-cache VRAM: the reserved KV pool is set by --gpu-memory-utilization (not this value), and the window only needs the pool to hold >=1 full sequence. If vLLM refuses at startup that the max seq len exceeds the KV cache, raise --gpu-memory-utilization or lower --max-num-seqs (or add TP)."
+}

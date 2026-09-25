@@ -1,0 +1,19 @@
+{
+  "_model": "poolside/Laguna-XS-2.1",
+  "_note": "Laguna XS 2.1 (33B-A3B MoE, 256 experts), poolside agentic coding model with interleaved thinking + KV cache in FP8. Card-reported SWE-bench Verified 70.9%.",
+  "_note_serve": "Per the model card: vllm serve --model poolside/Laguna-XS-2.1 --tool-call-parser poolside_v1 --reasoning-parser poolside_v1 --enable-auto-tool-choice --served-model-name laguna --default-chat-template-kwargs '{\"enable_thinking\": true}'. vLLM >= 0.21.0 AND must include PR #47311; without it, pass --tool-call-parser glm47 (the GLM 4.7 parser) instead or tool calls silently drop (memory: vllm-tool-parser-gotcha). CUSTOM REMOTE CODE (modeling_laguna.py) -> serve with --trust-remote-code.",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--enable-prefix-caching",
+    "--enforce-eager",
+    "--trust-remote-code",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser", "poolside_v1",
+    "--reasoning-parser", "poolside_v1"
+  ],
+  "spec_config": null,
+  "max_model_len": 131072,
+  "native_max_context": 262144,
+  "_note_context": "Served window (max_model_len) capped at 131072 for memory headroom; native max_position_embeddings is 262144 (the card benchmarks at 256K). Raise to 262144 if the runs hit the 131072 cap (pass MAX_MODEL_LEN=262144 in the qsub env).",
+  "_status": "UNVERIFIED -- requires vLLM >= 0.21.0 WITH PR #47311 in the serve image (verify against the stock 0.28.0 SIF). Confirm tool calls parse before a real run (vLLM tool-parser gotcha)."
+}

@@ -1,0 +1,13 @@
+environment:
+  environment_class: swerex_modal
+  image: python:3.11-slim
+  startup_timeout: 600.0
+  runtime_timeout: 1800.0
+  modal_sandbox_kwargs: {cpu: 2.0, memory: 4096}
+model:
+  model_name: openai/Qwen/Qwen3.8-27B
+  model_class: litellm    # replace portkey
+  model_kwargs:
+    temperature: 0.6
+    top_p: 0.95
+    drop_params: true

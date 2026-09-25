@@ -1,0 +1,25 @@
+{
+  "_model": "IFM/K2-Horizon-3.7B",
+  "_note": "IFM K2-Horizon-3.7B (dense, BF16, K2HorizonForCausalLM). Native 512K context, reasoning + tool-use. Card SWE-bench Verified --.",
+  "_note_serve": "Per the IFM vLLM recipe: vllm serve IFM/K2-Horizon-3.7B --trust-remote-code --dtype bfloat16 --reasoning-parser k2_horizon --enable-auto-tool-choice --tool-call-parser k2_horizon. CUSTOM REMOTE CODE (modeling_k2_horizon.py) -> --trust-remote-code REQUIRED. reasoning/output returned separately (reasoning_content), tool calls in xml/json/xml_typed (default xml) parsed by --tool-call-parser k2_horizon -- the wrong parser silently zeroes the eval (memory: vllm-tool-parser-gotcha). Tensor parallel: 1.",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--enable-prefix-caching",
+    "--enforce-eager",
+    "--trust-remote-code",
+    "--chat-template-content-format",
+    "string",
+    "--dtype",
+    "bfloat16",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser",
+    "k2_horizon",
+    "--reasoning-parser",
+    "k2_horizon"
+  ],
+  "spec_config": null,
+  "max_model_len": 262144,
+  "native_max_context": 524288,
+  "_note_context": "Served window (max_model_len) capped at 262144 for memory headroom; native is 524288 (512K). Raise to 524288 (MAX_MODEL_LEN=524288) if runs hit the cap and GPUs allow.",
+  "_status": "UNVERIFIED -- requires a vLLM with the k2_horizon parser/model (recent vLLM main or a release supporting K2). Confirm tool calls parse before a real run (vllm-tool-parser-gotcha). Model released 2026-09."
+}

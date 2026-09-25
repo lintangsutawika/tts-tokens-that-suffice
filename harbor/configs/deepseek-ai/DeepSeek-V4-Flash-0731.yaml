@@ -1,0 +1,25 @@
+# mini-swe-agent sampling for deepseek-ai/DeepSeek-V4-Flash-0731 (DeepSeek-V4-Flash,
+# MoE + MLA, DSpark speculative module).
+#
+# Selected by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+#
+# Sampling = the card's AGENTIC setting: temperature 1.0, top_p 0.95, reasoning_effort
+# "max" (the card evaluates code-agent tasks at max effort with temp 1.0 / top_p 0.95;
+# top_p 1.0 is for non-agentic). Max output length for high/max effort is 384K.
+# reasoning_effort rides in extra_body here; harbor's mini adapter can also set it via
+# -c model.model_kwargs.reasoning_effort -- if vLLM rejects it in extra_body, drop it
+# here and pass reasoning_effort through the adapter instead.
+#
+# !! HARD CAVEAT -- NO JINJA CHAT TEMPLATE. This release ships NO chat template; DeepSeek
+# provides a custom `encoding/` folder instead. So vLLM's standard chat + tool-call flow
+# does NOT work out of the box -- tool/function calling (which mini-swe-agent REQUIRES)
+# needs the vLLM DeepSeek-V4 recipe's dedicated parser/handling. Confirm tool calls parse
+# before any real run (the strongest form of the vLLM tool-parser gotcha). See
+# serve/models/deepseek-ai/DeepSeek-V4-Flash-0731.json.
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    drop_params: true
+    extra_body:
+      reasoning_effort: max

@@ -1,0 +1,63 @@
+Bootstrap: localimage
+From: /work1/grahamneubig/lsutawik/vllm-openai-rocm-0.20.2.sif
+
+%post
+    set -e
+
+    # The vLLM ROCm image ships vLLM + ROCm torch in the default python's
+    # site-packages. Create a venv that INHERITS them (--system-site-packages)
+    # so we never reinstall (and never risk pulling a CUDA torch over the
+    # ROCm one). All SkyRL deps install on top of that base.
+    python3 -m venv --system-site-packages /opt/skyrl-venv
+    export PATH=/opt/skyrl-venv/bin:$PATH
+    PY=/opt/skyrl-venv/bin/python
+    $PY -m pip install -q --upgrade pip uv
+
+    # Record the base image's torch so we can verify nothing clobbered it.
+    BASE_TORCH="$($PY -c 'import torch; print(torch.__version__)')"
+    echo "==> Base image torch: $BASE_TORCH"
+
+    # Clone the AMD tinker fork at the pinned commit.
+    rm -rf /skyrl
+    mkdir -p /skyrl && cd /skyrl
+    git init -q
+    git remote add origin https://github.com/adityasoni9998/SkyRL.git
+    git fetch --depth 1 -q origin 8b7d87161d3fd1d2f9458a595b73570db5345d17
+    git checkout -q FETCH_HEAD
+
+    # setup.md swaps in pyproject.other.toml (the AMD/ROCm packaging that omits
+    # CUDA-only deps and relies on the image's vllm) before installing.
+    cp pyproject.toml pyproject.toml.bak
+    cp pyproject.other.toml pyproject.toml
+
+    # Install SkyRL (editable) with fsdp + tinker extras, then the extra runtime
+    # deps setup.md adds. Faithful to the fork's recipe.
+    $PY -m pip install -e '.[fsdp,tinker]'
+    $PY -m pip install -U 'ray[all]==2.51.1'
+    $PY -m pip install 'flash-linear-attention[rocm]'
+    $PY -m pip install orjson torchdata
+
+    # Restore the original pyproject so the checkout matches upstream.
+    cp pyproject.toml.bak pyproject.toml
+    rm -f pyproject.toml.bak
+
+    # Guard: make sure the ROCm torch from the base image is still the one
+    # installed (a transitive dep can silently pull a CUDA build). If this
+    # changed, the install needs a torch constraint like build.sh has.
+    NOW_TORCH="$($PY -c 'import torch; print(torch.__version__)')"
+    echo "==> torch after install: $NOW_TORCH (base was $BASE_TORCH)"
+    if [ "$NOW_TORCH" != "$BASE_TORCH" ]; then
+        echo "WARNING: torch changed from $BASE_TORCH to $NOW_TORCH — verify it is still a ROCm/HIP build before trusting this image." >&2
+    fi
+    $PY -c 'import torch; assert torch.version.hip is not None, "torch is not a ROCm/HIP build!"; print("HIP:", torch.version.hip)'
+
+    # Sanity: vLLM importable from the baked venv.
+    $PY -c 'import vllm; print("vllm:", vllm.__version__)'
+
+%environment
+    export PATH=/opt/skyrl-venv/bin:$PATH
+    export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+    export RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
+    export RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
+    export ROCM_PATH=/opt/rocm
+    export SKYRL_DUMP_INFRA_LOG_TO_STDOUT=1

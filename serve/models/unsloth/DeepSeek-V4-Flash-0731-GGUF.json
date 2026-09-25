@@ -1,0 +1,18 @@
+{
+  "_model": "unsloth/DeepSeek-V4-Flash-0731-GGUF",
+  "_server": "llama.cpp (llama-server), NOT vLLM",
+  "_status": "WIRED -- consumed by SERVE_BACKEND=llama-cpp in scripts/eval/harbor_eval.sbatch, which reads llama_server_args below and appends --host/--port/--alias itself. Run with: SERVE_BACKEND=llama-cpp MODEL=openai/unsloth/DeepSeek-V4-Flash-0731-GGUF (optionally QUANT=<tag>). This is the GGUF/llama.cpp path; the FP4/vLLM path for the same model is serve/models/deepseek-ai/DeepSeek-V4-Flash-0731.json.",
+  "_note": "DeepSeek-V4-Flash 0731, MoE + MLA. unsloth ships ONLY Unsloth-Dynamic (UD-) GGUFs -- there is NO plain Q4_K_M. --jinja loads the chat template so tool/function calls work (required for mini-swe-agent); verify DeepSeek-V4 tool calls actually parse (llama.cpp analogue of the vLLM tool-parser gotcha). Needs a llama.cpp recent enough to load the DeepSeek-V4-Flash architecture -- confirm the :server-cuda tag supports it before trusting a run. First run -hf-downloads the (sharded) GGUF into HF_HOME; bind a persistent ROCM_CACHE_BASE so it isn't re-fetched (the sbatch gives llama-cpp a wide /health budget via SERVE_READY_TRIES).",
+  "_note_quant": "quant below is the default tag; override per-run with QUANT. The {QUANT} token in -hf is substituted by the loader. AVAILABLE (all UD-, unsloth dynamic): UD-IQ1_S, UD-IQ1_M, UD-IQ2_XXS, UD-IQ2_M, UD-IQ3_XXS, UD-IQ3_S, UD-IQ4_XS, UD-IQ4_NL, UD-Q2_K_XL, UD-Q3_K_M, UD-Q3_K_XL, UD-Q4_K_XL, UD-Q8_K_XL. UD-Q4_K_XL is the 4-bit K-quant (the closest thing to Q4_K_M); on ONE H200 (141 GB) a 4-bit of this MoE is tight-to-over -- the IQ1/IQ2 tags are the single-card options, Q4_K_XL+ likely needs 2xH200.",
+  "_note_args": "Do NOT put --host/--port/--alias here: the sbatch owns them (port is dynamically picked, alias is set to the model repo so /v1/models matches MODEL).",
+  "_note_spec": "DSpark speculative decoding: the repo's dspark/ dir holds the draft-model GGUF. To enable it, add a draft via llama-server's -md/--model-draft (or --model-draft-hf unsloth/DeepSeek-V4-Flash-0731-GGUF:dspark). Left OFF here -- get a plain run passing first, then add the draft.",
+  "quant": "UD-Q4_K_XL",
+  "native_max_context": 1048576,
+  "_note_context": "Served window is the -c value in llama_server_args (131072); the base model's (deepseek-ai/DeepSeek-V4-Flash-0731) native max_position_embeddings is 1048576 (1M). llama.cpp preallocates the FULL -c as KV cache at load, so a bigger window costs VRAM immediately -- 131072 is a VRAM-driven cap well below native (the vLLM/FP4 path serves 393216).",
+  "llama_server_args": [
+    "-hf", "unsloth/DeepSeek-V4-Flash-0731-GGUF:{QUANT}",
+    "-ngl", "99",
+    "-c", "131072",
+    "--jinja"
+  ]
+}

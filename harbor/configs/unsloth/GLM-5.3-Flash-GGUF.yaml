@@ -1,0 +1,20 @@
+# mini-swe-agent sampling for unsloth/GLM-5.3-Flash-GGUF (GLM-5.3-Flash, 320B-A18B
+# hybrid MoE), served via llama.cpp (llama-server, OpenAI-compatible).
+#
+# Selected by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml. Run with
+# MODEL=unsloth/GLM-5.3-Flash-GGUF (litellm gets openai/<repo>; the served-model-name
+# llama-server reports must match, or set --served-model-name on the server).
+#
+# Sampling = the model card's OWN mini-swe-agent (DeepSWE) setting: temperature 0.95,
+# top_p 1.0 (the card ran DeepSWE-style SWE eval in the mini-swe-agent harness with
+# exactly these). drop_params lets litellm pass them through the openai provider.
+#
+# SERVING: this is a GGUF served by llama-server, NOT vLLM -- see
+# serve/models/unsloth/GLM-5.3-Flash-GGUF.json for the llama-server args, and note it
+# needs a llama.cpp serve backend in harbor_eval.sbatch (not yet wired). Tool calls
+# require llama-server --jinja (the model's chat template); confirm they parse.
+model:
+  model_kwargs:
+    temperature: 0.95
+    top_p: 1.0
+    drop_params: true

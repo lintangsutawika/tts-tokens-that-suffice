@@ -1,0 +1,42 @@
+diff --git a/harbor/environments/singularity/singularity.py b/harbor/environments/singularity/singularity.py
+index c728d73..2167505 100644
+--- a/harbor/environments/singularity/singularity.py
++++ b/harbor/environments/singularity/singularity.py
+@@ -133,7 +133,36 @@ class SingularityEnvironment(BaseEnvironment):
+ 
+     @property
+     def _docker_image(self) -> str | None:
+-        return self.task_env_config.docker_image
++        # Upstream returns only task.toml [environment].docker_image. SWE-bench
++        # (and other Dockerfile-defined) tasks set no docker_image -- they declare
++        # their image via `FROM <image>` in environment/Dockerfile, which harbor's
++        # Singularity backend never builds. Fall back to that FROM so those tasks
++        # run: singularity pulls the base image and bootstrap.sh installs at runtime
++        # the deps the skipped RUN layers would have added.  [local patch]
++        if self.task_env_config.docker_image:
++            return self.task_env_config.docker_image
++        return self._docker_image_from_dockerfile()
++
++    def _docker_image_from_dockerfile(self) -> str | None:
++        """Return the effective (last, non-comment) FROM image, or None."""
++        if not self._dockerfile_path.exists():
++            return None
++        image: str | None = None
++        try:
++            for raw in self._dockerfile_path.read_text().splitlines():
++                line = raw.strip()
++                if not line or line.startswith("#"):
++                    continue
++                if line.upper().startswith("FROM "):
++                    ref = line.split(None, 1)[1].strip()
++                    # drop a trailing "AS <stage>" (multi-stage builds)
++                    upper = ref.upper()
++                    if " AS " in upper:
++                        ref = ref[: upper.index(" AS ")].strip()
++                    image = ref
++        except Exception:
++            return None
++        return image
+ 
+     @property
+     def _staging(self) -> Path:

@@ -1,0 +1,30 @@
+# mini-swe-agent sampling for Qwen/Qwen3.6-35B-A3B (self-hosted vLLM deliberator).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# Qwen3 thinking-mode recommended sampling (model card). Do NOT set temperature=0 --
+# greedy deterministically gets stuck on a malformed turn and trips mini-swe's
+# RepeatedFormatError loop (see memory: swebench-downstream-eval). top_k / min_p /
+# presence_penalty / repetition_penalty are not OpenAI-schema params, so they ride
+# in extra_body (vLLM reads them there); drop_params keeps litellm from erroring on
+# them for the openai provider.
+#
+# SERVING (harbor_eval.sbatch VLLM_EXTRA_ARGS): --tool-call-parser qwen3_coder, and
+# serve WITHOUT --reasoning-parser qwen3. With the reasoning parser on, a <tool_call>
+# emitted before a (frequently omitted) </think> gets swept into reasoning_content ->
+# no tool call -> error. Off, it stays in content where qwen3_coder extracts it.
+# See memory: vllm-tool-parser-gotcha.
+model:
+  model_kwargs:
+    temperature: 0.6
+    top_p: 0.95
+    drop_params: true
+    extra_body:
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 0.0
+      repetition_penalty: 1.0
+      chat_template_kwargs:
+        enable_thinking: true

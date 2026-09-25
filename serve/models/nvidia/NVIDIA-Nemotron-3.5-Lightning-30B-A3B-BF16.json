@@ -1,0 +1,22 @@
+{
+  "_model": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+  "_note": "Nemotron 3.5 Lightning hybrid Mamba-2 + MoE + Attention (30B-A3B). BF16 reference weights. Up to 1M ctx; 262144 on single H100 (memory-bound).",
+  "_note_serve": "Per the NVIDIA model card / vLLM recipe (vllm/vllm-openai:v0.27.1+, repo serves 0.28.0 which satisfies): --reasoning-parser nemotron_v3 (vLLM; SGLang uses nemotron_3) --tool-call-parser qwen3_coder --enable-auto-tool-choice, plus Mamba-specific flags (--mamba-backend flashinfer --mamba-ssm-cache-dtype float16 --enable-mamba-cache-stochastic-rounding --mamba-cache-philox-rounds 5).",
+  "extra_args": [
+    "--max-num-seqs", "128",
+    "--enable-prefix-caching",
+    "--async-scheduling",
+    "--mamba-backend", "flashinfer",
+    "--mamba-ssm-cache-dtype", "float16",
+    "--enable-mamba-cache-stochastic-rounding",
+    "--mamba-cache-philox-rounds", "5",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser", "qwen3_coder",
+    "--reasoning-parser", "nemotron_v3"
+  ],
+  "spec_config": null,
+  "max_model_len": 262144,
+  "native_max_context": 1048576,
+  "_note_context": "Served window (max_model_len) is 262144 -- sized to fit a single 80GB H100 in BF16 (the card's validated single-GPU context). Native max_position_embeddings is 1M; serving 1M needs TP8 + expert parallelism. Pass MAX_MODEL_LEN=262144 explicitly; the sbatch default is 131072.",
+  "_status": "UNVERIFIED -- model released 2026-08-11. Confirm tool calls actually parse before a real run (vLLM tool-parser gotcha): reasoning-parser nemotron_v3 + tool-call-parser qwen3_coder per the card. Text-only (no --language-model-only needed)."
+}

@@ -1,0 +1,30 @@
+# mini-swe-agent sampling for IFM/K2-Horizon-7B (self-hosted vLLM deliberator).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# K2-Horizon is a REASONING + tool-use model. The card's best practices for
+# evaluation:
+#   * reasoning_effort = "high" ALWAYS (medium/low trade accuracy; not for eval).
+#   * temperature 1.0, top_p 0.95.
+#   * allow >= 32768 max_tokens so reasoning is never cut off (truncated reasoning
+#     is a failed response). BUT mini-swe sets its own max_tokens; these settings
+#     are the generation defaults mini-swe should use.
+#   * tool calls in xml/json/xml_typed (default xml), parsed by k2_horizon parser.
+# reasoning_effort + tool_call_format ride in extra_body.chat_template_kwargs
+# (drop_params keeps litellm from erroring on them for the openai provider).
+#
+# SERVING (serve/models/IFM/K2-Horizon-7B.json): --dtype bfloat16
+# --trust-remote-code --reasoning-parser k2_horizon --tool-call-parser k2_horizon
+# --enable-auto-tool-choice. Custom remote code (modeling_k2_horizon.py) REQUIRED.
+# Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    drop_params: true
+    extra_body:
+      chat_template_kwargs:
+        reasoning_effort: high
+        tool_call_format: xml

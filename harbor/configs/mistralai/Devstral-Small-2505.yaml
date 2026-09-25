@@ -1,0 +1,21 @@
+# mini-swe-agent sampling for mistralai/Devstral-Small-2505 (self-hosted vLLM deliberator).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# Devstral Small (24B, Mistral-Small-3.1 base) is an agentic CODING model, NOT a
+# reasoning model -- there is no thinking/reasoning parser. The model card samples at
+# temperature 0.15 (top_p unspecified -> 1.0). drop_params keeps litellm from erroring
+# on any non-OpenAI-schema param for the openai provider.
+#
+# SERVING (serve/models/mistralai/Devstral-Small-2505.json): this checkpoint ships ONLY
+# the Mistral tokenizer (tekken.json) -- no tokenizer.json / chat_template -- so it MUST
+# be served in mistral format (--tokenizer-mode/-config-format/-load-format mistral) with
+# --tool-call-parser mistral. The wrong tool parser silently zeroes the eval (see memory:
+# vllm-tool-parser-gotcha).
+model:
+  model_kwargs:
+    temperature: 0.15
+    top_p: 1.0
+    drop_params: true

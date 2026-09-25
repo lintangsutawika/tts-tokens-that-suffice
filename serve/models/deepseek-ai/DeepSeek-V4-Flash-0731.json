@@ -1,0 +1,20 @@
+{
+  "_model": "deepseek-ai/DeepSeek-V4-Flash-0731",
+  "_status": "REFERENCE (Blackwell-tuned) -- adapt before running on H200/MI300",
+  "_note_hardware": "extra_args below are the card's B300/GB300 (Blackwell) recipe. deep_gemm_mega_moe, --attention-config use_fp4_indexer_cache, and (SGLang) mxfp4 are FP4/Blackwell features that will NOT work on H200 (Hopper) or MI300 (ROCm). On H200 drop the fp4 attention-config and pick a Hopper MoE backend; on MI300 also override the attention backend to TRITON_MLA (DeepSeek is MLA, same as GLM -- ROCM_AITER_FA rejects it, see memory: per-model-config-dirs). Check the vLLM recipe (recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash) for the non-Blackwell configs.",
+  "_note_tools": "This release has NO Jinja chat template -- DeepSeek ships a custom encoding/ folder. vLLM's standard tool-call parsing does NOT apply; tool/function calling (required by mini-swe-agent) needs the vLLM DeepSeek-V4 recipe's dedicated parser. NO --tool-call-parser is set below on purpose so a run fails loudly rather than silently mis-parsing (parser-gotcha). Fill it in only once the recipe confirms the right one.",
+  "_note_spec": "DSpark speculative decoding is model-native (draft weights are in the same checkpoint): spec_config method=dspark, 7 tokens, greedy draft.",
+  "extra_args": [
+    "--trust-remote-code",
+    "--kv-cache-dtype", "fp8",
+    "--block-size", "256",
+    "--enable-expert-parallel",
+    "--moe-backend", "deep_gemm_mega_moe",
+    "--attention-config", "{\"use_fp4_indexer_cache\":true}",
+    "--enable-auto-tool-choice"
+  ],
+  "spec_config": {"method": "dspark", "num_speculative_tokens": 7, "draft_sample_method": "greedy"},
+  "max_model_len": 393216,
+  "native_max_context": 1048576,
+  "_note_context": "Served window (max_model_len) is 393216; native max_position_embeddings is 1048576 (1M, via YaRN factor 16 over an original 65536 window). MLA + compressed KV make long context cheap here, which is why 393216 is already served (vs 131072 elsewhere); it can go up to 1M if the KV pool allows."
+}

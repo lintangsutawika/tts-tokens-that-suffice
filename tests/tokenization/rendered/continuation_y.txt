@@ -1,0 +1,10 @@
+Let me look at the `get_response_async` method in the base handler:
+</think>
+
+<tool_call>
+<function=bash>
+<parameter=command>
+grep -n "get_response_async\|_get_response" /testbed/django/core/handlers/base.py
+</parameter>
+</function>
+</tool_call><|im_end|>

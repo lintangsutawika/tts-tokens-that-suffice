@@ -1,0 +1,17 @@
+{
+  "_model": "unsloth/GLM-5.3-Flash-GGUF",
+  "_server": "llama.cpp (llama-server), NOT vLLM",
+  "_status": "WIRED -- consumed by SERVE_BACKEND=llama-cpp in scripts/eval/harbor_eval.sbatch, which reads llama_server_args below and appends --host/--port/--alias itself. Run with: SERVE_BACKEND=llama-cpp MODEL=openai/unsloth/GLM-5.3-Flash-GGUF (build the SIF via server/scripts/build-llama-cpp.sh with LLAMA_CPP_IMAGE=...:server-cuda, or let LLAMA_CPP_SIF pull the :server-cuda tag).",
+  "_note": "GLM-5.3-Flash 320B-A18B hybrid MoE, unsloth 1-bit dynamic quant. Fits one H200 (141 GB) with full GPU offload. Needs a recent llama.cpp (support in PR #27754) and the CUDA server image. --jinja enables the chat template so tool/function calls work (required for mini-swe-agent); verify GLM-5.3 tool calls actually parse (llama.cpp analogue of the vLLM tool-parser gotcha). Swap quant UD-IQ1_S (93 GB) <-> UD-IQ1_M (98 GB). First run -hf-downloads the ~93 GB GGUF into HF_HOME (bind a persistent ROCM_CACHE_BASE so it isn't re-fetched; the sbatch gives llama-cpp a wider /health budget via SERVE_READY_TRIES).",
+  "_note_args": "Do NOT put --host/--port/--alias here: the sbatch owns them (port is dynamically picked, alias is set to the model repo so /v1/models matches MODEL).",
+  "quant": "UD-IQ1_S",
+  "native_max_context": 1048576,
+  "_note_context": "Served window is the -c value in llama_server_args (131072); the base model's (zai-org/GLM-5.3-Flash) native max_position_embeddings is 1048576 (1M). llama.cpp preallocates the FULL -c as KV cache at load, so unlike vLLM a bigger window costs VRAM immediately -- 131072 is a VRAM-driven cap on the 1-bit quant, well below native.",
+  "_note_quant": "quant above is the default tag; override per-run with QUANT (e.g. QUANT=UD-IQ1_M). Available: UD-IQ1_S (93 GB) / UD-IQ1_M (98 GB) fit one H200; larger tags need more VRAM. The {QUANT} token in -hf below is substituted by the loader.",
+  "llama_server_args": [
+    "-hf", "unsloth/GLM-5.3-Flash-GGUF:{QUANT}",
+    "-ngl", "99",
+    "-c", "131072",
+    "--jinja"
+  ]
+}

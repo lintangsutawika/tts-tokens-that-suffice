@@ -1,0 +1,24 @@
+# mini-swe-agent sampling for zai-org/GLM-4.7-Flash (30B-A3B thinking MoE).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+#
+# Sampling = the model card's SWE-bench Verified settings (official Verified = 59.2):
+#   temperature 0.7, top_p 1.0, max_tokens 16384.
+# (The card's non-agentic default is temp 1.0 / top_p 0.95 / max 131072; the SWE-bench
+# numbers above are the ones to reproduce the reported score.) drop_params lets litellm
+# pass these through the openai provider without erroring.
+#
+# SERVING (harbor_eval.sbatch VLLM_EXTRA_ARGS) -- GLM has its OWN parsers; do NOT reuse
+# qwen3_coder (that would drop GLM tool calls -> RepeatedFormatError -> zeroed eval,
+# see memory: vllm-tool-parser-gotcha). Per the model card, serve with:
+#   --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice
+# NOTE: unlike Qwen (served with the reasoning parser OFF), GLM is served WITH
+# --reasoning-parser glm45 ON -- its template separates reasoning from the tool call
+# correctly, so tool calls are still extracted from content. Optional speculative
+# decoding per card: --speculative-config '{"method":"mtp","num_speculative_tokens":1}'.
+model:
+  model_kwargs:
+    temperature: 0.7
+    top_p: 1.0
+    max_tokens: 16384
+    drop_params: true

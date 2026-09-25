@@ -1,0 +1,21 @@
+{
+  "_model": "zai-org/GLM-4.7-Flash",
+  "_note": "GLM-4.7-Flash 30B-A3B. Per the model card, serve with --tool-call-parser glm47 --reasoning-parser glm45 --enable-auto-tool-choice. UNLIKE Qwen, GLM keeps the reasoning parser ON -- its template separates reasoning from the tool call, so glm47 still extracts tool calls from content. NO --language-model-only (GLM is text-only). Speculative decoding (mtp, 1 token) per card. Serving with qwen3_coder instead would drop GLM tool calls -> zeroed eval (memory: vllm-tool-parser-gotcha).",
+  "_note_mla": "GLM-4.x MoE uses MLA (Multi-head Latent Attention, like DeepSeek-V2). The mi300 backend (harbor_eval.sbatch ROCM_SERVE_EXTRA) defaults to --attention-backend ROCM_AITER_FA + --kv-cache-dtype fp8, which are for DENSE attention and reject MLA ('MLA not supported', 'head_size not supported'). extra_args below OVERRIDE both (vLLM appends VLLM_EXTRA_ARGS last, argparse last-wins): TRITON_MLA is the MLA backend this build auto-selects when AITER-MLA isn't enabled, and kv-cache-dtype auto avoids the fp8+MLA path. To try the faster AITER MLA instead, set env VLLM_ROCM_USE_AITER_MLA=1 and use ROCM_AITER_MLA.",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--max-num-batched-tokens", "32768",
+    "--enable-prefix-caching",
+    "--long-prefill-token-threshold", "0",
+    "--enforce-eager",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser", "glm47",
+    "--reasoning-parser", "glm45",
+    "--attention-backend", "TRITON_MLA",
+    "--kv-cache-dtype", "auto"
+  ],
+  "spec_config": {"method": "mtp", "num_speculative_tokens": 1},
+  "max_model_len": 131072,
+  "native_max_context": 202752,
+  "_note_context": "Served window (max_model_len) is 131072; native max_position_embeddings is 202752 (no RoPE scaling). 131072 is a deliberate cap. GLM's MLA keeps per-token KV cache small, so raising toward native is comparatively cheap on VRAM."
+}

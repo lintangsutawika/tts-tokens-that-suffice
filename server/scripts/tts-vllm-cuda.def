@@ -1,0 +1,27 @@
+Bootstrap: localimage
+From: /home/aci18914wh/vllm-openai-cuda-nightly.sif
+
+%post
+    set -e
+    PY=$(command -v python3)
+
+    # fastapi 0.116+ wraps routers from app.include_router in an internal
+    # _IncludedRouter object that has no .path attribute. The base image's
+    # prometheus-fastapi-instrumentator 8.0.0 iterates app.routes reading
+    # route.path, so every request 500s with
+    # "'_IncludedRouter' object has no attribute 'path'". 8.0.2 added explicit
+    # _IncludedRouter handling; bump only that package. (Same fix as build-vllm.sh.)
+    $PY -m pip install -q "prometheus-fastapi-instrumentator==8.0.2"
+
+    # Qwen3.5 (Gated-DeltaNet hybrid) needs causal_conv1d + fla kernels; on CUDA
+    # these are prebuilt wheels (contrast build.sh's HIP source build). fla is pure
+    # Python + Triton -- --no-deps so it doesn't pull a triton that shadows vllm's.
+    $PY -m pip install -q "causal-conv1d>=1.5.0"
+    $PY -m pip install -q --no-deps "fla-core==0.5.1" "flash-linear-attention==0.5.1"
+
+    # Guard: torch/vllm untouched.
+    $PY -c "import torch, vllm; print('torch', torch.__version__, '| vllm', vllm.__version__)"
+
+%environment
+    # vLLM serving needs no ROCm/HIP env on CUDA; leave the base image's defaults.
+    :
