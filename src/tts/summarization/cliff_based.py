@@ -2,9 +2,9 @@
 
 The rule-based context-compaction strategy from
 `CliffCompaction: Cost-Efficient Compaction for Long-Horizon Coding Agents`
-(Nguyen et al., 2026 — arXiv:2609.26779, MIT). Vendored core in
-``tts.summarization._cliff``; this class adapts it to the
-``tts.summarization.base.Compactor`` interface so it drops into
+(Nguyen et al., 2026 — arXiv:2609.26779, MIT). Uses the ``cliffcompaction``
+PyPI package's ``compact()`` + OpenAI-chat dialect; this class adapts it to
+the ``tts.summarization.base.Compactor`` interface so it drops into
 ``SummarizingAgent`` exactly like the mask/model/truncation strategies.
 
 Unlike ``ModelBasedSummarizer`` this needs no model call: the middle of the
@@ -22,8 +22,11 @@ maps onto the agent's ``keep_last_turns``; see the note below.
 
 from __future__ import annotations
 
-from ._cliff import Config as CliffConfig
-from ._cliff import DIALECT, SUMMARY_HEADER, compact
+from cliffcompaction.cliff import compact
+from cliffcompaction.config import Config as CliffConfig
+from cliffcompaction.dialects.base import SUMMARY_HEADER
+from cliffcompaction.dialects.openai_chat import DIALECT
+
 from .base import CompactionResult, split_head_tail
 
 

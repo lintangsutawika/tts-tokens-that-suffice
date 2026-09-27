@@ -36,6 +36,10 @@ dependencies = [
     # dir and logs completed/errored/mean_reward + per-error-type counts). Harbor has
     # no native tracker integration; core dep so `uv sync` provides it.
     "wandb>=0.18.0",
+    # Rule-based context compaction (CliffCompaction, MIT) — used in-process by
+    # tts.summarization.cliff_based.CliffCompactor; only compact()/dialect used,
+    # the proxy daemon is ignored.
+    "cliffcompaction>=0.1.0",
 ]
 
 [project.optional-dependencies]
