@@ -253,3 +253,6 @@ wandb/
 # editor
 *.sublime-project
 *.sublime-workspace
+
+# in-container pip --target deps (cliffcompaction etc.)
+src/.deps/
