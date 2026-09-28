@@ -107,6 +107,13 @@ class SummarizingAgent(DefaultAgent):
         # Input context token length fed to the deliberator at each model call
         # (post-compression) — a per-turn series for plotting context growth.
         self.context_tokens: list[int] = []
+        # Persist an explicit n_compressions=0 so a run with no compactions is
+        # distinguishable from one with no count (only when compressions_dir set).
+        if self.compressions_dir is not None:
+            try:
+                self._write_compression_count(0)
+            except OSError:
+                pass
 
     def _agent_model_name(self) -> str:
         """The litellm model string this agent uses (default for the summarizer)."""
@@ -187,6 +194,16 @@ class SummarizingAgent(DefaultAgent):
         )
         self.messages = result.messages
 
+    def _compression_subdir(self) -> Path:
+        """Per-trial subdir under compressions_dir (isolates concurrent trials)."""
+        return self.compressions_dir / str(self._iid)
+
+    def _write_compression_count(self, n: int) -> None:
+        """Persist the running n_compressions for this trial (best-effort)."""
+        sub = self._compression_subdir()
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "count.json").write_text(json.dumps({"n_compressions": n}, indent=2))
+
     def _save_compaction(self, record: dict) -> None:
         """Write one compaction event to its own file as it is triggered."""
         if self.compressions_dir is None:
@@ -194,6 +211,14 @@ class SummarizingAgent(DefaultAgent):
         self.compressions_dir.mkdir(parents=True, exist_ok=True)
         path = self.compressions_dir / f"compaction_{record['index']:03d}_{record['kind']}.json"
         path.write_text(json.dumps(record, indent=2))
+        # Persist the running count (n_compressions) so it survives container
+        # teardown and can be aggregated into result.json. Per-trial subdir so
+        # concurrent trials never collide under N_CONCURRENT. Best-effort.
+        try:
+            self._compression_subdir().mkdir(parents=True, exist_ok=True)
+            self._write_compression_count(self.n_compressions)
+        except OSError:
+            pass
 
     # -- agent loop hooks --------------------------------------------------
 

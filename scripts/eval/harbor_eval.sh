@@ -177,6 +177,11 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
             [ -n "${SUMMARIZER_MODEL}" ] && printf '  summarizer_model: %s\n' "${SUMMARIZER_MODEL}"
+            # Per-trial compaction records (and running n_compressions). Landing
+            # under the bind-mounted src/ keeps them on shared FS so they survive
+            # container teardown and can be aggregated into result.json. Scoped per
+            # run (JOB_NAME from sbatch; standalone falls back to the config name).
+            printf '  compressions_dir: %s\n' "${TTS_SRC}/.compressions/${JOB_NAME:-$(basename "${_EFF_CONFIG}" .yaml)}"
         fi
     } > "${_EFF_CONFIG}"
     echo "[config] BENCH=${BENCH}: step_limit=${STEP_LIMIT:-<none>}$(_is_true "${USE_SUMMARIZER}" && printf ' summarizer=%s@%stok' "${SUMMARIZER_COMPACTOR}" "${SUMMARIZER_TRIGGER_TOKENS}") -> ${_EFF_CONFIG}"

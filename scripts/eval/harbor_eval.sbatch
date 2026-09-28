@@ -717,3 +717,13 @@ fi
 bash scripts/eval/harbor_eval.sh "${BENCH}" &
 HARBOR_PID=$!
 wait "${HARBOR_PID}" || true
+# Record n_compressions (per-trial compaction counts) into the run result.json.
+# SummarizingAgent writes count.json files under src/.compressions/<JOB_NAME>/; sum
+# them and persist stats.n_compressions + a per-trial breakdown. Non-fatal.
+if [ -f "${JOBS_DIR:-jobs}/${JOB_NAME}/result.json" ]; then
+    _TS="${TTS_SRC:-${PWD}/src}"
+    _REC_PY=".venv/bin/python"; [ -x "${_REC_PY}" ] || _REC_PY="python3"
+    "${_REC_PY}" scripts/eval/record_n_compressions.py \
+        "${JOBS_DIR:-jobs}/${JOB_NAME}" \
+        "${_TS}/.compressions/${JOB_NAME}" || true
+fi
