@@ -90,7 +90,9 @@ class SummarizingAgent(DefaultAgent):
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.
-        self.compressions_dir = compressions_dir
+        # compressions_dir may arrive as a str from the yaml config; coerce to
+        # Path once so every `... / <name>` below works (str/str raises TypeError).
+        self.compressions_dir = Path(compressions_dir) if compressions_dir else None
         self.tokenizer = tokenizer
         self.compress_at_tokens = compress_at_tokens
         # If > 0, trigger on complete-turn count instead of tokens (matches how
