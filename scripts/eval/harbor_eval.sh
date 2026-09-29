@@ -177,6 +177,11 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
             [ -n "${SUMMARIZER_MODEL}" ] && printf '  summarizer_model: %s\n' "${SUMMARIZER_MODEL}"
+            # Per-trial compaction records (and running n_compressions). Landing
+            # under the bind-mounted src/ keeps them on shared FS so they survive
+            # container teardown and can be aggregated into result.json. Scoped per
+            # run (JOB_NAME from sbatch; standalone falls back to the config name).
+            printf '  compressions_dir: %s\n' "${TTS_SRC}/.compressions/${JOB_NAME:-$(basename "${_EFF_CONFIG}" .yaml)}"
         fi
     } > "${_EFF_CONFIG}"
     echo "[config] BENCH=${BENCH}: step_limit=${STEP_LIMIT:-<none>}$(_is_true "${USE_SUMMARIZER}" && printf ' summarizer=%s@%stok' "${SUMMARIZER_COMPACTOR}" "${SUMMARIZER_TRIGGER_TOKENS}") -> ${_EFF_CONFIG}"
@@ -429,7 +434,23 @@ esac
 # tts.agent.summarization_agent (the agent_class in the generated config) WITHOUT
 # installing tts. The writable-sandbox env pre-creates the bind destination.
 if _is_true "${USE_SUMMARIZER}"; then
-    ARGS+=( --ae "PYTHONPATH=${TTS_SRC_MOUNT}" )
+    # The CliffCompactor imports cliffcompaction (a pip dep reachable in the
+    # project venv but NOT in the container's mini-swe tool venv). Install it into
+    # a target dir inside the bind-mounted src/ so the agent venv can import it,
+    # without forking harbor or vendoring the package. Idempotent; shared FS.
+    if [ "${SUMMARIZER_COMPACTOR:-mask}" = "cliff" ]; then
+        TTS_DEP_TARGET="${TTS_SRC}/.deps"
+        if ! [ -d "${TTS_DEP_TARGET}/cliffcompaction" ]; then
+            echo "[env] installing cliffcompaction -> ${TTS_DEP_TARGET} (for compactor=cliff in-container)"
+            mkdir -p "${TTS_DEP_TARGET}"
+            uv pip install --quiet --python "${TTS_SRC}/../.venv/bin/python" \
+                --target "${TTS_DEP_TARGET}" "cliffcompaction>=0.1.0" >/dev/null 2>&1 \
+              || echo "WARNING: could not install cliffcompaction into ${TTS_DEP_TARGET}; compactor=cliff will fail in-container" >&2
+        fi
+    fi
+    # Point the agent at the bound src AND its .deps (cliffcompaction etc.), so the
+    # container's mini-swe tool venv can import packages the project venv has.
+    ARGS+=( --ae "PYTHONPATH=${TTS_SRC_MOUNT}:${TTS_SRC_MOUNT}/.deps" )
     # Use harbor's first-class --mounts (Docker-Compose long-form volume). Passing the
     # bind via --ek mounts= is the MANUAL `harbor task` route and does NOT forward to the
     # env on `harbor run` -> the mount silently never binds -> tts not importable ->
