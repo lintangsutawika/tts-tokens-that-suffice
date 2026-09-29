@@ -114,9 +114,13 @@ class ThemeModelBasedSummarizer:
         self,
         messages: list[dict],
         keep_first: int = 4,
-        keep_last_turns: int = 3,
+        keep_last_turns: int = 0,
     ) -> CompactionResult:
-        head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
+        # No tail is kept verbatim: the only the head (keep_first) is preserved
+        # alongside the per-theme summaries. keep_last_turns is accepted for
+        # Compactor-interface compatibility but intentionally not used.
+        head, _middle, _tail = split_head_tail(messages, keep_first, 0)
+        middle = _middle
         if not middle:
             return CompactionResult(
                 messages=list(messages), kind="summary", summary=None,
@@ -185,7 +189,7 @@ class ThemeModelBasedSummarizer:
             start, end = max(0, start), min(n_steps - 1, end)
             blocks.extend(_message_for_step(steps, i, middle) for i in range(start, end + 1))
 
-        new_messages = [*head, *blocks, *tail]
+        new_messages = [*head, *blocks]
         summary_text = "\n\n".join(
             t.get("summary") for t in themes if isinstance(t.get("summary"), str)
         )
@@ -202,13 +206,50 @@ class ThemeModelBasedSummarizer:
             },
         )
 
-
 class ThemeLitellmSummarizer:
-    """litellm backend returning the JSON per-theme output under THEME_SYSTEM_PROMPT.
+    """litellm backend returning the JSON per-theme output as a TOOL CALL.
 
-    Mirrors LitellmSummarizer: greedy, thinking disabled to match qwen3_disable_thinking.
-    `model` is the litellm model string; api_base/api_key optional (default = env).
+    The model emits the themes via the ``emit_themes`` tool (tool_choice forced),
+    so the JSON arrives in ``tool_calls[0].function.arguments`` — far more reliable
+    than parsing a JSON blob from free-form prose. Greedy, thinking disabled to
+    match qwen3_disable_thinking. `model` is the litellm model string; api_base/
+    api_key optional (default = env).
     """
+
+    THEMES_TOOL = {
+        "type": "function",
+        "function": {
+            "name": "emit_themes",
+            "description": (
+                "Report the subtasks (themes) you identified. One entry per "
+                "contiguous theme; completed themes carry a summary, the "
+                "in-progress (last) theme has summary=null and in_progress=true."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "themes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "start_idx": {"type": "integer"},
+                                "end_idx": {"type": "integer"},
+                                "in_progress": {"type": "boolean"},
+                                "summary": {"type": ["string", "null"]},
+                            },
+                            "required": [
+                                "name", "start_idx", "end_idx",
+                                "in_progress", "summary",
+                            ],
+                        },
+                    }
+                },
+                "required": ["themes"],
+            },
+        },
+    }
 
     def __init__(self, model: str, api_base: str = "", api_key: str = "",
                  max_tokens: int = 1024, system_prompt: str = THEME_SYSTEM_PROMPT):
@@ -225,6 +266,8 @@ class ThemeLitellmSummarizer:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": format_trajectory_text_numbered(steps)},
             ],
+            tools=[self.THEMES_TOOL],
+            tool_choice={"type": "function", "function": {"name": "emit_themes"}},
             temperature=0.0,
             max_tokens=self.max_tokens,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},
@@ -234,4 +277,9 @@ class ThemeLitellmSummarizer:
         if self.api_key:
             kwargs["api_key"] = self.api_key
         resp = litellm.completion(**kwargs)
-        return resp.choices[0].message.content or ""
+        msg = resp.choices[0].message
+        tcs = getattr(msg, "tool_calls", None) or []
+        if not tcs:
+            # Fallback: backend returned plain content instead of a tool call.
+            return msg.content or ""
+        return tcs[0].function.arguments or ""
