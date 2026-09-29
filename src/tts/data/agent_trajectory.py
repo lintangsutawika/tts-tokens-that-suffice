@@ -88,7 +88,7 @@ format. Be concrete and specific; omit anything not grounded in the events.\
 
 # Selectable summary styles for the model-based compactor. The KEYS are the public style
 # names (SUMMARIZER_STYLE); "sectioned" is the training default.
-THEME_SYSTEM_PROMPT = """\
+SUBTASK_SYSTEM_PROMPT = """\
 You are maintaining a context-aware state summary for an interactive coding agent.
 You will be given a task description followed by a sequence of the agent's actions and
 observations. The agent has not yet finished.
@@ -120,7 +120,7 @@ Constraints:
   • The in_progress theme's summary is always null; do not compress it.
 
 Example:
-{"themes": [{"name": "explore repo", "start_idx": 0, "end_idx": 4, "in_progress": false,
+{"subtasks": [{"name": "explore repo", "start_idx": 0, "end_idx": 4, "in_progress": false,
   "summary": "Listed the repository, located the relevant module and its entry point."},
  {"name": "reproduce bug", "start_idx": 5, "end_idx": 9, "in_progress": false,
   "summary": "Set up a repro, hit the reported error, narrowed it to the serializer path."},
@@ -133,7 +133,7 @@ Example:
 SUMMARY_STYLE_PROMPTS: dict[str, str] = {
     "sectioned": SYSTEM_PROMPT,
     "unconstrained": SYSTEM_PROMPT_UNCONSTRAINED,
-    "theme": THEME_SYSTEM_PROMPT,
+    "subtask": SUBTASK_SYSTEM_PROMPT,
 }
 
 

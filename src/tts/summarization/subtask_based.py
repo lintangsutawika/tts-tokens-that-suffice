@@ -13,7 +13,7 @@ finished work is compacted — and compacted per-theme rather than as one blob.
 Contract (Contract A, model-driven):
   The model is given the trajectory MIDDLE rendered as numbered ``[STEP i]``
   events (see ``format_trajectory_text_numbered``) and returns a JSON object:
-      {"themes": [
+      {"subtasks": [
           {"name", "start_idx", "end_idx", "in_progress", "summary"},
           ...
       ]}
@@ -35,7 +35,7 @@ import logging
 import litellm
 
 from tts.data.agent_trajectory import (
-    THEME_SYSTEM_PROMPT,
+    SUBTASK_SYSTEM_PROMPT,
     TrajectoryStep,
     format_trajectory_text_numbered,
     get_summary_prompt,
@@ -47,14 +47,14 @@ from .base import CompactionResult, split_head_tail
 logger = logging.getLogger(__name__)
 
 
-class ThemeParsingError(ValueError):
+class SubtaskParsingError(ValueError):
     """The theme summarizer returned something we could not parse into themes."""
 
 
-def _parse_themes(raw: str) -> list[dict]:
+def _parse_subtasks(raw: str) -> list[dict]:
     """Parse the model's JSON theme output. Tolerates stray markdown fences or
     surrounding prose by extracting the first JSON object. Returns the theme
-    list; raises ThemeParsingError if unusable."""
+    list; raises SubtaskParsingError if unusable."""
     text = raw.strip()
     # strip ```json ... ``` fences if present
     if text.startswith("```"):
@@ -66,14 +66,14 @@ def _parse_themes(raw: str) -> list[dict]:
         start = text.find("{")
         end = text.rfind("}")
         if start < 0 or end <= start:
-            raise ThemeParsingError("no JSON object found in theme output")
+            raise SubtaskParsingError("no JSON object found in theme output")
         try:
             data = json.loads(text[start : end + 1])
         except json.JSONDecodeError as e:
-            raise ThemeParsingError(f"theme output not JSON: {e}") from e
-    themes = data.get("themes") if isinstance(data, dict) else None
+            raise SubtaskParsingError(f"theme output not JSON: {e}") from e
+    themes = data.get("subtasks") if isinstance(data, dict) else None
     if not isinstance(themes, list) or not themes:
-        raise ThemeParsingError("theme output missing non-empty 'themes' list")
+        raise SubtaskParsingError("theme output missing non-empty 'themes' list")
     return themes
 
 
@@ -99,12 +99,12 @@ def _message_for_step(steps: list[TrajectoryStep], idx: int, middle: list[dict])
     raise IndexError(f"step index {idx} out of range (n_steps={step_idx})")
 
 
-class ThemeModelBasedSummarizer:
+class SubtaskModelBasedSummarizer:
     """Compactor that partitions the middle into per-theme summaries, keeping the
     in-progress theme verbatim. Satisfies base.Compactor.
 
     `summarizer` : a callable ``summarize(steps) -> str`` (litellm/tinker backend)
-                   returning the JSON themes output under THEME_SYSTEM_PROMPT.
+                   returning the JSON themes output under SUBTASK_SYSTEM_PROMPT.
     """
 
     def __init__(self, summarizer):
@@ -124,16 +124,16 @@ class ThemeModelBasedSummarizer:
         if not middle:
             return CompactionResult(
                 messages=list(messages), kind="summary", summary=None,
-                metadata={"themes": [], "n_compressed": 0},
+                metadata={"subtasks": [], "n_compressed": 0},
             )
 
         steps = messages_to_steps(middle)
         if not steps:
             return CompactionResult(messages=list(messages), kind="summary",
-                                    summary=None, metadata={"themes": []})
+                                    summary=None, metadata={"subtasks": []})
         try:
             raw = self.summarizer.summarize(steps)
-            themes = _parse_themes(raw)
+            themes = _parse_subtasks(raw)
         except Exception as exc:
             logger.warning(f"theme summarization failed ({exc}); keeping middle verbatim")
             return CompactionResult(
@@ -150,7 +150,7 @@ class ThemeModelBasedSummarizer:
         blocks: list[dict] = []
         compressed_msgs = 0
         kept_progress_msgs = 0
-        meta_themes = []
+        meta_subtasks = []
         for t in themes:
             start = int(t.get("start_idx", 0))
             end = int(t.get("end_idx", start))
@@ -161,7 +161,7 @@ class ThemeModelBasedSummarizer:
                 start, end = end, start
             in_progress = bool(t.get("in_progress", False))
             summary = t.get("summary")
-            meta_themes.append({
+            meta_subtasks.append({
                 "name": t.get("name", "?"),
                 "start_idx": start, "end_idx": end,
                 "in_progress": in_progress,
@@ -199,27 +199,27 @@ class ThemeModelBasedSummarizer:
             summary=summary_text or None,
             metadata={
                 "theme": True,
-                "n_themes": len(themes),
+                "n_subtasks": len(themes),
                 "n_compressed_msgs": compressed_msgs,
                 "n_kept_progress_msgs": kept_progress_msgs,
-                "themes": meta_themes,
+                "subtasks": meta_subtasks,
             },
         )
 
-class ThemeLitellmSummarizer:
+class SubtaskLitellmSummarizer:
     """litellm backend returning the JSON per-theme output as a TOOL CALL.
 
-    The model emits the themes via the ``emit_themes`` tool (tool_choice forced),
+    The model emits the themes via the ``emit_subtasks`` tool (tool_choice forced),
     so the JSON arrives in ``tool_calls[0].function.arguments`` — far more reliable
     than parsing a JSON blob from free-form prose. Greedy, thinking disabled to
     match qwen3_disable_thinking. `model` is the litellm model string; api_base/
     api_key optional (default = env).
     """
 
-    THEMES_TOOL = {
+    SUBTASKS_TOOL = {
         "type": "function",
         "function": {
-            "name": "emit_themes",
+            "name": "emit_subtasks",
             "description": (
                 "Report the subtasks (themes) you identified. One entry per "
                 "contiguous theme; completed themes carry a summary, the "
@@ -228,7 +228,7 @@ class ThemeLitellmSummarizer:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "themes": {
+                    "subtasks": {
                         "type": "array",
                         "items": {
                             "type": "object",
@@ -246,13 +246,13 @@ class ThemeLitellmSummarizer:
                         },
                     }
                 },
-                "required": ["themes"],
+                "required": ["subtasks"],
             },
         },
     }
 
     def __init__(self, model: str, api_base: str = "", api_key: str = "",
-                 max_tokens: int = 1024, system_prompt: str = THEME_SYSTEM_PROMPT):
+                 max_tokens: int = 1024, system_prompt: str = SUBTASK_SYSTEM_PROMPT):
         self.model = model
         self.api_base = api_base
         self.api_key = api_key
@@ -266,8 +266,8 @@ class ThemeLitellmSummarizer:
                 {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": format_trajectory_text_numbered(steps)},
             ],
-            tools=[self.THEMES_TOOL],
-            tool_choice={"type": "function", "function": {"name": "emit_themes"}},
+            tools=[self.SUBTASKS_TOOL],
+            tool_choice={"type": "function", "function": {"name": "emit_subtasks"}},
             temperature=0.0,
             max_tokens=self.max_tokens,
             extra_body={"chat_template_kwargs": {"enable_thinking": False}},

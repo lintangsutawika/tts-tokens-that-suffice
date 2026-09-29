@@ -3,7 +3,7 @@
   * MaskBasedSummarizer       — keep the agent's actions, elide environment output
   * TruncationBasedSummarizer — drop the middle outright
   * CliffCompactor            — rule-based CliffCompaction summary (no model call)
-  * ThemeModelBasedSummarizer — model segments the middle into per-subtask
+  * SubtaskModelBasedSummarizer — model segments the middle into per-subtask
     (theme) summaries; the in-progress theme is kept verbatim (not summarized)
 
 `make_compactor(name, ...)` builds one from a config string — used when the
@@ -13,14 +13,14 @@ harbor) that can only carry scalars, not a constructed object.
 from .cliff_based import CliffCompactor
 from .mask_based import MaskBasedSummarizer
 from .model_based import ModelBasedSummarizer
-from .theme_based import ThemeModelBasedSummarizer
+from .subtask_based import SubtaskModelBasedSummarizer
 from .truncation_based import TruncationBasedSummarizer
 
 __all__ = [
     "CliffCompactor",
     "MaskBasedSummarizer",
     "ModelBasedSummarizer",
-    "ThemeModelBasedSummarizer",
+    "SubtaskModelBasedSummarizer",
     "TruncationBasedSummarizer",
     "make_compactor",
 ]
@@ -39,12 +39,12 @@ def make_compactor(
 ):
     """Build a compactor from a config string.
 
-    name: "mask" | "truncation" | "model" | "theme" | "cliff" | "none". For
-    "model" and "theme", `summarizer_model` must be set (callers default it to
+    name: "mask" | "truncation" | "model" | "subtask" | "cliff" | "none". For
+    "model" and "subtask", `summarizer_model` must be set (callers default it to
     the agent's own model); leaving api_base/api_key empty means "use the
     agent's endpoint" (litellm resolves them from the environment);
     `summarizer_style` picks the summary prompt ("sectioned" | "unconstrained"
-    | "theme"). "cliff" builds the rule-based CliffCompaction compactor (no
+    | "subtask"). "cliff" builds the rule-based CliffCompaction compactor (no
     model call). Returns None for "none"/"off".
     """
     name = (name or "mask").strip().lower()
@@ -70,13 +70,13 @@ def make_compactor(
                 system_prompt=get_summary_prompt(summarizer_style),
             )
         )
-    if name in ("theme", "theme_model", "subtask"):
-        from .theme_based import ThemeLitellmSummarizer
+    if name in ("subtask", "theme_model"):
+        from .subtask_based import SubtaskLitellmSummarizer
 
         if not summarizer_model:
-            raise ValueError("compactor='theme' requires summarizer_model")
-        return ThemeModelBasedSummarizer(
-            ThemeLitellmSummarizer(
+            raise ValueError("compactor='subtask' requires summarizer_model")
+        return SubtaskModelBasedSummarizer(
+            SubtaskLitellmSummarizer(
                 summarizer_model,
                 api_base=summarizer_api_base,
                 api_key=summarizer_api_key,

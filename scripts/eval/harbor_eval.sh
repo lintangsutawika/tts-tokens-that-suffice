@@ -115,7 +115,7 @@ fi
 _is_true() { case "${1:-}" in true|True|TRUE|1|yes|on) return 0 ;; *) return 1 ;; esac; }
 USE_SUMMARIZER="${USE_SUMMARIZER:-false}"
 SUMMARIZER_COMPACTOR="${SUMMARIZER_COMPACTOR:-mask}"            # mask | truncation | model | none
-SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model only: sectioned | unconstrained
+SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model: sectioned|unconstrained; subtask: subtask
 SUMMARIZER_TRIGGER_TOKENS="${SUMMARIZER_TRIGGER_TOKENS:-64000}"
 SUMMARIZER_KEEP_FIRST="${SUMMARIZER_KEEP_FIRST:-4}"
 SUMMARIZER_KEEP_LAST_TURNS="${SUMMARIZER_KEEP_LAST_TURNS:-3}"
@@ -139,9 +139,10 @@ _SUM_TAG=""
 if _is_true "${USE_SUMMARIZER}"; then
     _trig="${SUMMARIZER_TRIGGER_TOKENS}"; case "${_trig}" in *000) _trig="$((_trig/1000))k" ;; esac
     _cmp="${SUMMARIZER_COMPACTOR}"
-    # For model, the summary STYLE is part of the identity (own dir/run); mask/truncation
-    # have no style.
-    [ "${_cmp}" = "model" ] && _cmp="model-${SUMMARIZER_STYLE}"
+    # For model/subtask, the summary STYLE is part of the identity (own dir/run);
+    # mask/truncation have no style.
+    if [ "${_cmp}" = "model" ]; then _cmp="model-${SUMMARIZER_STYLE}"
+    elif [ "${_cmp}" = "subtask" ]; then _cmp="subtask"; fi
     _SUM_TAG="-sum-${_cmp}-${_trig}"
 fi
 
@@ -173,6 +174,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  agent_class: tts.agent.summarization_agent.SummarizingAgent\n'
             printf '  compactor: %s\n' "${SUMMARIZER_COMPACTOR}"
             [ "${SUMMARIZER_COMPACTOR}" = "model" ] && printf '  summarizer_style: %s\n' "${SUMMARIZER_STYLE}"
+            [ "${SUMMARIZER_COMPACTOR}" = "subtask" ] && printf '  summarizer_style: subtask\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"

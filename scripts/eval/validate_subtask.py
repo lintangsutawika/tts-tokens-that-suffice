@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """One-shot validation of the theme summarizer's tool-call output.
 
-Runs ThemeLitellmSummarizer against a REAL model on a slice of a real trajectory
-and prints the emit_themes tool call it returns, so you can confirm the model
-(a) emits the emit_themes tool (not prose) and (b) returns valid, contiguous,
+Runs SubtaskLitellmSummarizer against a REAL model on a slice of a real trajectory
+and prints the emit_subtasks tool call it returns, so you can confirm the model
+(a) emits the emit_subtasks tool (not prose) and (b) returns valid, contiguous,
 non-overlapping step ranges with exactly one in_progress theme.
 
 Env (loaded from the environment or .env if python-dotenv is present):
@@ -54,20 +54,20 @@ def main() -> int:
     msgs = json.loads(Path(probe).read_text())["messages"]
 
     from tts.data.agent_trajectory import messages_to_steps
-    from tts.summarization.theme_based import ThemeLitellmSummarizer, _parse_themes
+    from tts.summarization.subtask_based import SubtaskLitellmSummarizer, _parse_subtasks
 
     # Summarize a bounded middle (say first ~40 steps) to keep the call cheap.
     middle = msgs[4:80]
     steps = messages_to_steps(middle)
     print(f"model={model} base={base} n_steps={len(steps)}")
 
-    s = ThemeLitellmSummarizer(model, api_base=base, api_key=key, max_tokens=2048)
+    s = SubtaskLitellmSummarizer(model, api_base=base, api_key=key, max_tokens=2048)
     raw = s.summarize(steps)
     print("--- raw tool-call arguments ---")
     print(raw[:4000])
 
     try:
-        themes = _parse_themes(raw)
+        themes = _parse_subtasks(raw)
         print("--- parsed themes (%d) ---" % len(themes))
         for t in themes:
             print(
