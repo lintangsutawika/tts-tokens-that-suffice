@@ -1685,7 +1685,7 @@ modal = [
 [[package]]
 name = "harbor-singularity-hpc"
 version = "0.1.0"
-source = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=feb364a45a197320cbb86fdfd93eecf454d4a77a#feb364a45a197320cbb86fdfd93eecf454d4a77a" }
+source = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=5cbfacfd28dc1fbeca813cdc6c55bf7d311e517a#5cbfacfd28dc1fbeca813cdc6c55bf7d311e517a" }
 dependencies = [
     { name = "harbor" },
     { name = "httpx" },
@@ -5763,7 +5763,7 @@ requires-dist = [
     { name = "cliffcompaction", specifier = ">=0.1.0" },
     { name = "datasets", specifier = ">=3.0.0" },
     { name = "harbor", extras = ["modal"], marker = "python_full_version >= '3.12'", git = "https://github.com/harbor-framework/harbor.git?rev=c178c20710c362ef806c5d5d18852f95b21ca34b" },
-    { name = "harbor-singularity-hpc", marker = "python_full_version >= '3.12'", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=feb364a45a197320cbb86fdfd93eecf454d4a77a" },
+    { name = "harbor-singularity-hpc", marker = "python_full_version >= '3.12'", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=5cbfacfd28dc1fbeca813cdc6c55bf7d311e517a" },
     { name = "litellm", specifier = ">=1.89.1" },
     { name = "matplotlib", specifier = ">=3.11.0" },
     { name = "mini-swe-agent", extras = ["full"], specifier = ">=2.4.5" },
