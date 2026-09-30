@@ -14,9 +14,7 @@
     "--tool-call-parser",
     "k2_horizon",
     "--reasoning-parser",
-    "k2_horizon",
-    "--max-model-len",
-    "131072"
+    "k2_horizon"
   ],
   "spec_config": null,
   "max_model_len": 131072,

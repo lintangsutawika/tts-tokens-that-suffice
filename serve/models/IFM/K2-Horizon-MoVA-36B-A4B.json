@@ -1,0 +1,24 @@
+{
+  "_model": "IFM/K2-Horizon-MoVA-36B-A4B",
+  "_note": "IFM K2-Horizon-MoVA-36B-A4B (MoE 36B total / 4B active, MoVA attention, BF16 weights -- NOT the FP8 repo). Native 512K context. Reasoning + tool-use.",
+  "_note_serve": "Per the IFM card: vLLM serve --revision main --tensor-parallel-size 2 --enable-expert-parallel --trust-remote-code --reasoning-parser k2_horizon --tool-call-parser k2_horizon --enable-auto-tool-choice --max-model-len 131072. CUSTOM REMOTE CODE -> --trust-remote-code REQUIRED. This is the BF16 (non-FP8) variant: no FP8 quant block (.alignment so --dtype bfloat16 is fine (unlike the FP8 repo, which auto-detects and must not force bfloat16). TP=2 still used for the 36B MoE (memory-friendly on 8 GPUs). Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--enable-prefix-caching",
+    "--enforce-eager",
+    "--trust-remote-code",
+    "--dtype",
+    "bfloat16",
+    "--enable-expert-parallel",
+    "--enable-auto-tool-choice",
+    "--tool-call-parser",
+    "k2_horizon",
+    "--reasoning-parser",
+    "k2_horizon"
+  ],
+  "spec_config": null,
+  "max_model_len": 131072,
+  "native_max_context": 524288,
+  "_note_context": "Served window capped at 131072 (memory-friendly for a TP=2 36B MoE). Native is 524288 (512K); raise if the node''s VRAM allows.",
+  "_status": "UNVERIFIED -- requires vLLM with k2_horizon parser + MoVA arch support (recent vLLM main or a release supporting K2). BF16 variant: no FP8 quant concerns. Confirm tool calls parse before a real run (vllm-tool-parser-gotcha)."
+}
