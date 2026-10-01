@@ -5,7 +5,7 @@
   "extra_args": [
     "--enable-chunked-prefill",
     "--max-num-batched-tokens",
-    "4096",
+    "16384",
     "--enable-prefix-caching",
     "--long-prefill-token-threshold",
     "0",
