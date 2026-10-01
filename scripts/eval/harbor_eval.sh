@@ -85,12 +85,12 @@ LITELLM_MODEL="${LITELLM_PROVIDER}/${MODEL}"
 DELIBERATOR_BASE_URL="${DELIBERATOR_BASE_URL:-}"
 # vLLM ignores the key's value but mini-swe-agent requires a non-empty key.
 DELIBERATOR_API_KEY="${DELIBERATOR_API_KEY:-EMPTY}"
-# Per-model sampling config lives in harbor/configs/<MODEL>.yaml (MODEL is the bare
+# Per-model sampling config lives in configs/sampling/<MODEL>.yaml (MODEL is the bare
 # repo). So MODEL=zai-org/GLM-4.7-Flash auto-selects
-# harbor/configs/zai-org/GLM-4.7-Flash.yaml. Add a new model by dropping a yaml at that
+# configs/sampling/zai-org/GLM-4.7-Flash.yaml. Add a new model by dropping a yaml at that
 # path (see the existing ones for the sampling + required serving flags). Override
 # MINI_CONFIG to force a specific file (e.g. the legacy harbor/mini_qwen.yaml).
-MINI_CONFIG="${MINI_CONFIG:-harbor/configs/${MODEL}.yaml}"
+MINI_CONFIG="${MINI_CONFIG:-configs/sampling/${MODEL}.yaml}"
 
 if [ -z "${DELIBERATOR_BASE_URL}" ]; then
     echo "ERROR: set DELIBERATOR_BASE_URL to a PUBLIC OpenAI-compatible endpoint" >&2
@@ -100,9 +100,9 @@ fi
 
 if [ ! -f "${MINI_CONFIG}" ]; then
     echo "ERROR: sampling config not found: ${MINI_CONFIG}" >&2
-    echo "       (auto-derived from MODEL=${MODEL}). Add it under harbor/configs/," >&2
+    echo "       (auto-derived from MODEL=${MODEL}). Add it under configs/sampling/," >&2
     echo "       or set MINI_CONFIG explicitly. Available configs:" >&2
-    find harbor/configs -name '*.yaml' 2>/dev/null | sort | sed 's/^/         /' >&2
+    find configs/sampling -name '*.yaml' 2>/dev/null | sort | sed 's/^/         /' >&2
     exit 2
 fi
 
@@ -160,7 +160,7 @@ case "${BENCH}" in
     *)        STEP_LIMIT="${STEP_LIMIT:-}" ;;
 esac
 if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
-    _GEN_DIR="harbor/configs/.generated"
+    _GEN_DIR="configs/sampling/.generated"
     mkdir -p "${_GEN_DIR}"
     _EFF_CONFIG="${_GEN_DIR}/$(printf '%s' "${BENCH}-${MODEL}${_SUM_TAG}" | tr '/ ' '__').yaml"
     # ONE appended agent: block carries the step cap AND (when enabled) the summarizer
@@ -168,7 +168,15 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
     # disjoint, so this overrides only these keys and keeps mini's system_template etc.
     {
         cat "${MINI_CONFIG}"
-        printf '\n# injected by harbor_eval.sh (BENCH=%s)\nagent:\n' "${BENCH}"
+        printf '\n# injected by harbor_eval.sh (BENCH=%s)\n' "${BENCH}"
+        # Cap per-turn generation tokens for all models (bounded gen, prevents
+        # unbounded output / context blow-up). Set MAX_TOKENS (e.g. 32768); empty
+        # leaves the model/litellm default (unbounded). Merge-safe (mini deep-merges
+        # model.* across -c files).
+        if [ -n "${MAX_TOKENS:-}" ]; then
+            printf 'model:\n  model_kwargs:\n    max_tokens: %s\n' "${MAX_TOKENS}"
+        fi
+        printf 'agent:\n'
         [ -n "${STEP_LIMIT}" ] && printf '  step_limit: %s\n' "${STEP_LIMIT}"
         if _is_true "${USE_SUMMARIZER}"; then
             printf '  agent_class: tts.agent.summarization_agent.SummarizingAgent\n'
@@ -179,10 +187,6 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
             [ -n "${SUMMARIZER_MODEL}" ] && printf '  summarizer_model: %s\n' "${SUMMARIZER_MODEL}"
-            # Per-trial compaction records (and running n_compressions). Landing
-            # under the bind-mounted src/ keeps them on shared FS so they survive
-            # container teardown and can be aggregated into result.json. Scoped per
-            # run (JOB_NAME from sbatch; standalone falls back to the config name).
             printf '  compressions_dir: %s\n' "${TTS_SRC}/.compressions/${JOB_NAME:-$(basename "${_EFF_CONFIG}" .yaml)}"
         fi
     } > "${_EFF_CONFIG}"

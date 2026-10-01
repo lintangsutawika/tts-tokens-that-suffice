@@ -1,0 +1,26 @@
+# mini-swe-agent sampling for IFM/K2-Horizon-MoVA-36B-A4B-FP8 (self-hosted vLLM).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# K2-Horizon is a REASONING + tool-use model. Evaluation best practices:
+#   * reasoning_effort = "high" ALWAYS.
+#   * temperature 1.0, top_p 0.95, allow >= 32768 max_tokens.
+#   * tool calls in xml/json/xml_typed (default xml), parsed by k2_horizon parser.
+# reasoning_effort + tool_call_format ride in extra_body.chat_template_kwargs.
+#
+# SERVING (serve/models/IFM/K2-Horizon-MoVA-36B-A4B-FP8.json): TP=2 +
+# --enable-expert-parallel REQUIRED (FP8 routed-expert linears only split into
+# 128-wide quant blocks at TP 1/2), --trust-remote-code, k2_horizon parsers.
+# FP8 repo: vLLM auto-detects the FP8 quant config (do NOT force --dtype bfloat16).
+# Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    drop_params: true
+    extra_body:
+      chat_template_kwargs:
+        reasoning_effort: high
+        tool_call_format: xml

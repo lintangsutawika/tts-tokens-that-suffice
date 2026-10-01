@@ -225,7 +225,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-harbor/configs/.generated/
+configs/sampling/.generated/
 
 # ---- ABCI eval data (large, not source) ----
 jobs/
