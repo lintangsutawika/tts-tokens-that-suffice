@@ -70,4 +70,4 @@ harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c2
 # harbor: its overrides track harbor's internals, so pin them together and bump both
 # deliberately). Its own pyproject requires harbor>=0.22,<0.23, satisfied by the git
 # harbor above (dist version 0.22.0).
-harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "b61dec54e3e2b7845dc75a15848047403af8ef2c" }
+harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "59dd049489cd5cad286e9c08be72542837f502d8" }
