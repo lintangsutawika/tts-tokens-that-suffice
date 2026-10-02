@@ -109,6 +109,9 @@ class SummarizingAgent(DefaultAgent):
         # Input context token length fed to the deliberator at each model call
         # (post-compression) — a per-turn series for plotting context growth.
         self.context_tokens: list[int] = []
+        # Actual input-prompt tokens the server reported on the last model call
+        # (None until the first response). Drives _context_tokens() when set.
+        self.last_prompt_tokens: int | None = None
         # Persist an explicit n_compressions=0 so a run with no compactions is
         # distinguishable from one with no count (only when compressions_dir set).
         if self.compressions_dir is not None:
@@ -129,10 +132,23 @@ class SummarizingAgent(DefaultAgent):
     def _tokens_of(self, messages: list[dict]) -> int:
         text = "\n".join(message_text(m) for m in messages)
         if self.tokenizer is None:
-            return len(text) // 4  # crude fallback
+            # Conservative estimate that must NOT undercount: chars//4 undercounts
+            # code/JSON/tool-heavy content (real ratio can be ~3 chars/token) and
+            # misses the chat-template/role overhead per message, so compaction
+            # could fire too late and hit the serve's max_model_len (seen as
+            # ContextWindowExceededError on long agent channels). Use chars//3 for
+            # the text PLUS a small per-message overhead for role/format tokens.
+            return len(text) // 3 + 4 * len(messages)
         return len(self.tokenizer.encode(text))
 
     def _context_tokens(self) -> int:
+        # Prefer the ACTUAL input-token count the server reported on the last
+        # model call (message.extra.response.usage.prompt_tokens), avoiding the
+        # chars//4 estimate which undercounts code/tool-heavy contexts and
+        # delayed compaction (ContextWindowExceededError). Falls back to the
+        # estimate only before the first response has arrived.
+        if self.last_prompt_tokens is not None:
+            return self.last_prompt_tokens
         return self._tokens_of(self.messages)
 
     def _context_turns(self) -> int:
@@ -231,7 +247,16 @@ class SummarizingAgent(DefaultAgent):
         # Record the input context length for this turn (the messages the
         # deliberator is about to be queried with, after any compression).
         self.context_tokens.append(self._tokens_of(self.messages))
-        return super().query()
+        msg = super().query()
+        # Capture the actual input-token count from the server's usage so the
+        # NEXT turn's compaction trigger uses the real context, not an estimate.
+        try:
+            usage = ((msg.get("extra") or {}).get("response") or {}).get("usage") or {}
+            if usage.get("prompt_tokens") is not None:
+                self.last_prompt_tokens = int(usage["prompt_tokens"])
+        except Exception:
+            pass
+        return msg
 
     def step(self) -> list[dict]:
         if self._pm is not None:
