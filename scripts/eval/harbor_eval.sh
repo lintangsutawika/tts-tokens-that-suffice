@@ -119,7 +119,11 @@ SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model: sectione
 SUMMARIZER_TRIGGER_TOKENS="${SUMMARIZER_TRIGGER_TOKENS:-64000}"
 SUMMARIZER_KEEP_FIRST="${SUMMARIZER_KEEP_FIRST:-4}"
 SUMMARIZER_KEEP_LAST_TURNS="${SUMMARIZER_KEEP_LAST_TURNS:-3}"
-SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-}"                        # empty => reuse the agent's own model
+# The summarizer model defaults to the agent's own model (LITELLM_MODEL =
+# <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
+# summarizer_model (make_compactor("subtask") hard-fails without it). Users may
+# override SUMMARIZER_MODEL to point the summarizer at a different model.
+SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-${LITELLM_MODEL}}"
 # Host path bound into the task container (this repo's src/) and the mountpoint it appears
 # at (also the agent's PYTHONPATH). src/ lives on shared FS -> valid on every node, so it
 # bakes cleanly into the resumed job config.

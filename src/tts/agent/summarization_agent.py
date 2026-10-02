@@ -122,10 +122,27 @@ class SummarizingAgent(DefaultAgent):
 
     def _agent_model_name(self) -> str:
         """The litellm model string this agent uses (default for the summarizer)."""
+        # Resolve the agent's own litellm model string across the model wrappers
+        # used by mini-swe-agent / harbor (LitellmModel.config.model_name,
+        # a bare .model_name, .name, or the repr). Raise loudly if we cannot
+        # resolve it — the subtask/model compactors REQUIRE summarizer_model, and
+        # a silent "" here leaves compactor=None (always False _should_compact).
         cfg = getattr(self.model, "config", None)
-        return (getattr(cfg, "model_name", None)
-                or getattr(self.model, "model_name", None)
-                or "")
+        name = (
+            getattr(cfg, "model_name", None)
+            or getattr(self.model, "model_name", None)
+            or getattr(self.model, "name", None)
+            or ""
+        )
+        if not name:
+            s = str(self.model).strip()
+            name = s if s and s.lower() not in ("<object>", "none", "") else ""
+        if not name:
+            raise ValueError(
+                "could not resolve the agent's model name for the summarizer; "
+                "set summarizer_model explicitly in the config"
+            )
+        return name
 
     # -- trigger -----------------------------------------------------------
 
