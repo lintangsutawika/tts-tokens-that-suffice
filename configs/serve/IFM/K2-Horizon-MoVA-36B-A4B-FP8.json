@@ -17,7 +17,7 @@
     "k2_horizon"
   ],
   "spec_config": null,
-  "max_model_len": 524288,
+  "max_model_len": 131072,
   "native_max_context": 524288,
   "_note_context": "Served window capped at 131072 (matches the card's vLLM recipe -- memory-friendly for the MoE FP8). Native is 524288 (512K); raise if GPUs allow (TP=2 36B needs ample VRAM).",
   "_status": "UNVERIFIED -- requires vLLM with k2_horizon parser + MoVA/FP8 arch support (recent vLLM main or a release supporting K2). Confirm tool calls parse + FP8 loads before a real run (vllm-tool-parser-gotcha)."
