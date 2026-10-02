@@ -187,7 +187,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
             [ -n "${SUMMARIZER_MODEL}" ] && printf '  summarizer_model: %s\n' "${SUMMARIZER_MODEL}"
-            printf '  compressions_dir: %s\n' "${TTS_SRC}/.compressions/${JOB_NAME:-$(basename "${_EFF_CONFIG}" .yaml)}"
+            printf '  compressions_dir: /logs/agent\n'  # -> jobs/<run>/<trial>/agent/count.json (harbor syncs /logs/agent -> trial agent dir)
         fi
     } > "${_EFF_CONFIG}"
     echo "[config] BENCH=${BENCH}: step_limit=${STEP_LIMIT:-<none>}$(_is_true "${USE_SUMMARIZER}" && printf ' summarizer=%s@%stok' "${SUMMARIZER_COMPACTOR}" "${SUMMARIZER_TRIGGER_TOKENS}") -> ${_EFF_CONFIG}"

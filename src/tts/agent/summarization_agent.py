@@ -197,8 +197,10 @@ class SummarizingAgent(DefaultAgent):
         self.messages = result.messages
 
     def _compression_subdir(self) -> Path:
-        """Per-trial subdir under compressions_dir (isolates concurrent trials)."""
-        return self.compressions_dir / str(self._iid)
+        # compressions_dir points at the container's per-trial /logs/agent
+        # (synced back to jobs/<run>/<trial>/agent/), so count.json lands
+        # directly in that dir -- no extra per-trial subdir needed.
+        return self.compressions_dir
 
     def _write_compression_count(self, n: int) -> None:
         """Persist the running n_compressions for this trial (best-effort)."""

@@ -24,21 +24,24 @@ import sys
 from pathlib import Path
 
 
-def main(run_dir: str, compressions_root: str) -> int:
+def main(run_dir: str, compressions_root: str = "") -> int:
+    # Compaction counts land in each trial's agent dir (harbor syncs the container
+    # /logs/agent back): jobs/<run>/<trial>/agent/count.json
     run = Path(run_dir)
-    root = Path(compressions_root)
     rp = run / "result.json"
     if not rp.exists():
         print(f"no result.json at {rp}; nothing to do", file=sys.stderr)
-        return 2
-    if not root.is_dir():
-        print(f"no compressions dir {root}; result.json left unchanged", file=sys.stderr)
         return 2
 
     per_trial: dict[str, int] = {}
     total = 0
     n_files = 0
-    for count_path in sorted(root.glob("*/count.json")):
+    count_paths = sorted(run.glob("*/agent/count.json"))
+    if not count_paths and compressions_root:
+        root = Path(compressions_root)
+        if root.is_dir():
+            count_paths = sorted(root.glob("*/count.json"))
+    for count_path in count_paths:
         try:
             n = int(json.loads(count_path.read_text()).get("n_compressions", 0))
         except (OSError, ValueError, json.JSONDecodeError) as e:
