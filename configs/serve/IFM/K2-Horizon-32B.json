@@ -18,7 +18,7 @@
     "k2_horizon"
   ],
   "spec_config": null,
-  "max_model_len": 262144,
+  "max_model_len": 524288,
   "native_max_context": 524288,
   "_note_context": "Served window (max_model_len) capped at 262144 for memory headroom; native is 524288 (512K). Raise to 524288 (MAX_MODEL_LEN=524288) if runs hit the cap and GPUs allow.",
   "_status": "UNVERIFIED -- requires a vLLM with the k2_horizon parser/model (recent vLLM main or a release supporting K2). Confirm tool calls parse before a real run (vllm-tool-parser-gotcha). Model released 2026-09."

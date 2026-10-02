@@ -19,7 +19,7 @@
     "k2_horizon"
   ],
   "spec_config": null,
-  "max_model_len": 131072,
+  "max_model_len": 524288,
   "native_max_context": 524288,
   "_note_context": "Served window capped at 131072 (memory-friendly for a TP=2 36B MoE). Native is 524288 (512K); raise if the node''s VRAM allows.",
   "_status": "UNVERIFIED -- requires vLLM with k2_horizon parser + MoVA arch support (recent vLLM main or a release supporting K2). BF16 variant: no FP8 quant concerns. Confirm tool calls parse before a real run (vllm-tool-parser-gotcha)."
