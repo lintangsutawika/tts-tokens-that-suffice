@@ -51,16 +51,33 @@ def main(run_dir: str, compressions_root: str = "") -> int:
         total += n
         n_files += 1
 
+    # Collect the summarization OUTPUTS (compaction_*.json) per trial: each
+    # carries the generated summary, kind, token counts, metadata, and the
+    # pre-compression input messages.
+    compressions_per_trial: dict[str, list[dict]] = {}
+    comp_paths = sorted(run.glob("*/agent/compaction_*.json"))
+    for cp in comp_paths:
+        trial = cp.parent.name
+        try:
+            rec = json.loads(cp.read_text())
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            print(f"skip {cp}: {e}", file=sys.stderr)
+            continue
+        compressions_per_trial.setdefault(trial, []).append(rec)
+
     with rp.open("r+") as f:
         d = json.load(f)
         stats = d.setdefault("stats", {})
         stats["n_compressions"] = total
         stats["n_compressions_per_trial"] = per_trial
+        if compressions_per_trial:
+            stats["compressions"] = compressions_per_trial
         f.seek(0)
         json.dump(d, f, indent=2)
         f.truncate()
 
-    print(f"recorded n_compressions={total} across {n_files} trials -> {rp}")
+    print(f"recorded n_compressions={total} across {n_files} trials, "
+          f"{sum(len(v) for v in compressions_per_trial.values())} compaction outputs -> {rp}")
     return 0
 
 
