@@ -246,7 +246,7 @@ class SummarizingAgent(DefaultAgent):
         if self.compressions_dir is None:
             return
         self.compressions_dir.mkdir(parents=True, exist_ok=True)
-        path = self.compressions_dir / f"compaction_{record['index']:03d}_{record['kind']}.json"
+        path = self.compressions_dir / f"compaction_{record['index']:03d}.json"
         path.write_text(json.dumps(record, indent=2))
         # Persist the running count (n_compressions) so it survives container
         # teardown and can be aggregated into result.json. Per-trial subdir so
