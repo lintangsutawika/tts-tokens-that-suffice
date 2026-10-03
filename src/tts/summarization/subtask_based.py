@@ -44,6 +44,18 @@ from tts.data.agent_trajectory import (
 
 from .base import CompactionResult, split_head_tail
 
+
+# Marker prefix on each inserted subtask-summary message so re-compaction can
+# keep PRIOR per-theme summaries verbatim (they are already self-contained
+# subtask summaries) and only summarize the NEW context accumulated since the
+# last compaction -- not re-segment the old summaries.
+SUBTASK_SUMMARY_HEADER = "<subtask-summary> "
+
+
+def is_subtask_summary(msg: dict) -> bool:
+    c = msg.get("content")
+    return isinstance(c, str) and c.startswith(SUBTASK_SUMMARY_HEADER)
+
 logger = logging.getLogger(__name__)
 
 
@@ -127,10 +139,21 @@ class SubtaskModelBasedSummarizer:
                 metadata={"subtasks": [], "n_compressed": 0},
             )
 
-        steps = messages_to_steps(middle)
+        # Re-compaction: PRIOR subtask-summary messages are already self-contained
+        # per-theme summaries -- keep them verbatim and only segment the NEW
+        # context accumulated since the last compaction (never re-segment the old
+        # summaries). Partition the middle accordingly; preserve order.
+        prior_summaries = [m for m in middle if is_subtask_summary(m)]
+        fresh = [m for m in middle if not is_subtask_summary(m)]
+
+        steps = messages_to_steps(fresh)
         if not steps:
-            return CompactionResult(messages=list(messages), kind="summary",
-                                    summary=None, metadata={"subtasks": []})
+            # Nothing new to segment -- keep everything (prior summaries + fresh)
+            # verbatim.
+            return CompactionResult(
+                messages=list(messages), kind="summary", summary=None,
+                metadata={"subtasks": [], "n_compressed": 0},
+            )
         try:
             raw = self.summarizer.summarize(steps)
             themes = _parse_subtasks(raw)
@@ -171,10 +194,11 @@ class SubtaskModelBasedSummarizer:
             if in_progress or not summary:
                 # keep the theme's steps verbatim
                 for i in range(start, end + 1):
-                    blocks.append(_message_for_step(steps, i, middle))
+                    blocks.append(_message_for_step(steps, i, fresh))
                     kept_progress_msgs += 1
             else:
-                blocks.append({"role": "user", "content": summary})
+                blocks.append({"role": "user",
+                               "content": SUBTASK_SUMMARY_HEADER + str(summary)})
                 compressed_msgs += (end - start + 1)
 
         # If the model did not mark any theme in_progress, fall back to keeping the
@@ -187,9 +211,9 @@ class SubtaskModelBasedSummarizer:
             start = int(last.get("start_idx", 0))
             end = int(last.get("end_idx", start))
             start, end = max(0, start), min(n_steps - 1, end)
-            blocks.extend(_message_for_step(steps, i, middle) for i in range(start, end + 1))
+            blocks.extend(_message_for_step(steps, i, fresh) for i in range(start, end + 1))
 
-        new_messages = [*head, *blocks]
+        new_messages = [*head, *prior_summaries, *blocks]
         summary_text = "\n\n".join(
             t.get("summary") for t in themes if isinstance(t.get("summary"), str)
         )
