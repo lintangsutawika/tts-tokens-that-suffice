@@ -177,11 +177,11 @@ class SubtaskModelBasedSummarizer:
         for t in themes:
             start = int(t.get("start_idx", 0))
             end = int(t.get("end_idx", start))
-            # clamp to valid range
-            start = max(0, start)
-            end = min(n_steps - 1, end) if end >= 0 else start
+            # clamp both bounds to valid range (model can return out-of-range)
+            start = max(0, min(n_steps - 1, start))
+            end = max(0, min(n_steps - 1, end))
             if end < start:
-                start, end = end, start
+                start, end = end, start  # start,end already in [0, n_steps-1]
             in_progress = bool(t.get("in_progress", False))
             summary = t.get("summary")
             meta_subtasks.append({
@@ -210,7 +210,8 @@ class SubtaskModelBasedSummarizer:
             # safe: re-keep last theme's steps
             start = int(last.get("start_idx", 0))
             end = int(last.get("end_idx", start))
-            start, end = max(0, start), min(n_steps - 1, end)
+            start = max(0, min(n_steps - 1, start))
+            end = max(0, min(n_steps - 1, end))
             blocks.extend(_message_for_step(steps, i, fresh) for i in range(start, end + 1))
 
         new_messages = [*head, *prior_summaries, *blocks]
