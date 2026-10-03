@@ -128,10 +128,10 @@ class SubtaskModelBasedSummarizer:
         keep_first: int = 4,
         keep_last_turns: int = 0,
     ) -> CompactionResult:
-        # No tail is kept verbatim: the only the head (keep_first) is preserved
-        # alongside the per-theme summaries. keep_last_turns is accepted for
-        # Compactor-interface compatibility but intentionally not used.
-        head, _middle, _tail = split_head_tail(messages, keep_first, 0)
+        # keep_first forced to 2: only the system + task user message are preserved
+        # verbatim as the head. Everything else (incl. prior <subtask-summary>
+        # messages) is part of the compactable region. No tail kept verbatim.
+        head, _middle, _tail = split_head_tail(messages, 2, 0)
         middle = _middle
         if not middle:
             return CompactionResult(

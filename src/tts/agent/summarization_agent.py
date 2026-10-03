@@ -199,6 +199,19 @@ class SummarizingAgent(DefaultAgent):
             keep_first=self.keep_first,
             keep_last_turns=self.keep_last_turns,
         )
+        # No-reduction guard: if the compactor returned the same size (or larger)
+        # -- e.g. the subtask model marked everything in_progress -- do NOT count
+        # it as a compression or churn repeatedly. This prevents a no-op compactor
+        # from firing every turn while the context grows unbounded (seen as 64x
+        # no-op compactions -> ContextWindowExceededError).
+        tokens_after = self._tokens_of(result.messages)
+        if len(result.messages) >= n_before and tokens_after >= tokens_before:
+            logger.info(
+                f"{self._iid}: compaction no-op (no reduction: "
+                f"{n_before} msgs / {tokens_before} tok -> "
+                f"{len(result.messages)} msgs / {tokens_after} tok); skipping"
+            )
+            return
         if result.kind == "summary_failed":
             logger.warning(
                 f"{self._iid}: summarization failed "
@@ -212,7 +225,7 @@ class SummarizingAgent(DefaultAgent):
             "n_msgs_before": n_before,
             "n_msgs_after": len(result.messages),
             "tokens_before": tokens_before,
-            "tokens_after": self._tokens_of(result.messages),
+            "tokens_after": tokens_after,
             "summary": result.summary,
             "metadata": result.metadata,
             # The partial trajectory fed to the compactor (the pre-compression
