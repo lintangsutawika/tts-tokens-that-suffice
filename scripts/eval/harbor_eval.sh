@@ -4,6 +4,7 @@
 #   1. SWE-bench Verified   -> swe-bench/swe-bench-verified          (500, test-graded)
 #   2. SWE-bench Pro        -> scale-ai/swe-bench-pro                (731, test-graded)
 #   3. Senior SWE-bench     -> snorkel-ai/senior-swe-bench-v2026.06  ( 50, LLM-judge)
+#   4. Terminal-Bench 2.1   -> terminal-bench/terminal-bench-2-1     ( 89, graded)
 #
 # All three are pre-published Harbor datasets (no adapter needed). Harbor installs
 # mini-swe-agent inside a Modal sandbox per task, the agent solves it by calling
@@ -51,7 +52,7 @@ _PRESET_API_KEY="${DELIBERATOR_API_KEY:-}"
 
 BENCH="${1:-${BENCH:-}}"
 if [ -z "${BENCH}" ]; then
-    echo "usage: scripts/eval/harbor_eval.sh <verified|pro|senior>" >&2
+    echo "usage: scripts/eval/harbor_eval.sh <verified|pro|senior|terminal>" >&2
     exit 2
 fi
 
@@ -59,7 +60,8 @@ case "${BENCH}" in
     verified) DATASET="swe-bench/swe-bench-verified" ;;
     pro)      DATASET="scale-ai/swe-bench-pro" ;;
     senior)   DATASET="snorkel-ai/senior-swe-bench-v2026.06" ;;
-    *) echo "unknown benchmark '${BENCH}' (want verified|pro|senior)" >&2; exit 2 ;;
+    terminal) DATASET="terminal-bench/terminal-bench-2-1" ;;
+    *) echo "unknown benchmark '${BENCH}' (want verified|pro|senior|terminal)" >&2; exit 2 ;;
 esac
 
 # --- Deliberator (task-solving model) -------------------------------------------
