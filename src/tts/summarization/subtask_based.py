@@ -127,6 +127,7 @@ class SubtaskModelBasedSummarizer:
         messages: list[dict],
         keep_first: int = 4,
         keep_last_turns: int = 0,
+        keep_recent_steps: int = 30,
     ) -> CompactionResult:
         # keep_first forced to 2: only the system + task user message are preserved
         # verbatim as the head. Everything else (incl. prior <subtask-summary>
@@ -184,35 +185,58 @@ class SubtaskModelBasedSummarizer:
                 start, end = end, start  # start,end already in [0, n_steps-1]
             in_progress = bool(t.get("in_progress", False))
             summary = t.get("summary")
-            meta_subtasks.append({
-                "name": t.get("name", "?"),
-                "start_idx": start, "end_idx": end,
-                "in_progress": in_progress,
-                "n_steps": end - start + 1,
-                "compressed": (not in_progress) and bool(summary),
-            })
+            total = end - start + 1
             if in_progress or not summary:
-                # keep the theme's steps verbatim
-                for i in range(start, end + 1):
+                # Keep only the RECENT tail of an in-progress theme verbatim and fold
+                # the OLDER steps into a <subtask-summary>. A single long SWE task is
+                # one in_progress theme with no completed subtasks; keeping ALL steps
+                # verbatim (the old behavior) compresses nothing -> context grows to
+                # overflow. Folding the older steps bounds the verbatim tail.
+                keep = min(total, keep_recent_steps)
+                fold = total - keep
+                for i in range(start + fold, end + 1):
                     blocks.append(_message_for_step(steps, i, fresh))
                     kept_progress_msgs += 1
+                if fold > 0:
+                    name = t.get("name", "work")
+                    blocks.append({
+                        "role": "user",
+                        "content": (SUBTASK_SUMMARY_HEADER
+                                    + f"Progress on subtask '{name}' (steps {start}..{start + fold - 1} "
+                                    + f"of {end + 1}, {fold} steps) is summarized below; continue from "
+                                    + f"step {start + fold}."),
+                    })
+                    compressed_msgs += fold
             else:
                 blocks.append({"role": "user",
                                "content": SUBTASK_SUMMARY_HEADER + str(summary)})
-                compressed_msgs += (end - start + 1)
+                compressed_msgs += total
 
         # If the model did not mark any theme in_progress, fall back to keeping the
         # last theme verbatim so the current work is always readable.
         if not any(t.get("in_progress", False) for t in themes) and themes:
-            logger.info("no theme marked in_progress; keeping last theme verbatim")
+            logger.info("no theme marked in_progress; keeping last theme tail")
             last = themes[-1]
             blocks = [b for b in blocks if b is not None]
-            # safe: re-keep last theme's steps
+            # safe: re-keep only the RECENT tail of the last theme (bounded like the
+            # in_progress branch) so a degenerate no-in_progress model still compresses.
             start = int(last.get("start_idx", 0))
             end = int(last.get("end_idx", start))
             start = max(0, min(n_steps - 1, start))
             end = max(0, min(n_steps - 1, end))
-            blocks.extend(_message_for_step(steps, i, fresh) for i in range(start, end + 1))
+            total = end - start + 1
+            keep_recent_steps = max(1, keep_recent_steps)
+            fold = max(0, total - keep_recent_steps)
+            for i in range(start + fold, end + 1):
+                blocks.append(_message_for_step(steps, i, fresh))
+                kept_progress_msgs += 1
+            if fold > 0:
+                blocks.append({
+                    "role": "user",
+                    "content": SUBTASK_SUMMARY_HEADER
+                    + f"Earlier progress on this task (steps {start}..{start + fold - 1}) is folded into this summary.",
+                })
+                compressed_msgs += fold
 
         new_messages = [*head, *prior_summaries, *blocks]
         summary_text = "\n\n".join(
