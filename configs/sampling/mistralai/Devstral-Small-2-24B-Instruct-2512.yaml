@@ -23,5 +23,5 @@ model:
   model_kwargs:
     temperature: 0.15
     top_p: 1.0
-    max_tokens: 32768
+    max_tokens: 16384
     drop_params: true
