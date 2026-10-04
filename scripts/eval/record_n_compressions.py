@@ -63,6 +63,13 @@ def main(run_dir: str, compressions_root: str = "") -> int:
         except (OSError, ValueError, json.JSONDecodeError) as e:
             print(f"skip {cp}: {e}", file=sys.stderr)
             continue
+        # Strip the raw pre-compaction message list: it's ~95% of each record's
+        # weight and already retained in the per-trial compaction_*.json files.
+        # result.json.stats.compressions only needs the lightweight metadata
+        # (index/kind/token counts/meta/summary); embedding input_messages for
+        # every compaction across every trial would bloat result.json to
+        # hundreds of MB.
+        rec.pop("input_messages", None)
         compressions_per_trial.setdefault(trial, []).append(rec)
 
     with rp.open("r+") as f:
