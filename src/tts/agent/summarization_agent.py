@@ -68,6 +68,10 @@ class SummarizingAgent(DefaultAgent):
         summarizer_style: str = "sectioned",
         mask_output: bool = True,
         mask_thinking: bool = False,
+        mask_keep_n: int = 10,
+        mask_tagged_keep: bool = True,
+        mask_long_output_chars: int = 5000,
+        mask_descriptive_placeholder: bool = True,
         progress_manager=None,
         instance_id: str = "",
         compressions_dir: Path | None = None,
@@ -87,6 +91,10 @@ class SummarizingAgent(DefaultAgent):
                 summarizer_style=summarizer_style,
                 mask_output=mask_output,
                 mask_thinking=mask_thinking,
+                mask_keep_n=mask_keep_n,
+                mask_tagged_keep=mask_tagged_keep,
+                mask_long_output_chars=mask_long_output_chars,
+                mask_descriptive_placeholder=mask_descriptive_placeholder,
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.

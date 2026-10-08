@@ -36,6 +36,10 @@ def make_compactor(
     summarizer_style: str = "sectioned",
     mask_output: bool = True,
     mask_thinking: bool = False,
+    mask_keep_n: int = 10,
+    mask_tagged_keep: bool = True,
+    mask_long_output_chars: int = 5000,
+    mask_descriptive_placeholder: bool = True,
 ):
     """Build a compactor from a config string.
 
@@ -51,7 +55,14 @@ def make_compactor(
     if name in ("none", "off", ""):
         return None
     if name == "mask":
-        return MaskBasedSummarizer(mask_output=mask_output, mask_thinking=mask_thinking)
+        return MaskBasedSummarizer(
+            mask_output=mask_output,
+            mask_thinking=mask_thinking,
+            keep_n=mask_keep_n,
+            tagged_keep=mask_tagged_keep,
+            long_output_chars=mask_long_output_chars,
+            descriptive_placeholder=mask_descriptive_placeholder,
+        )
     if name in ("truncation", "truncate"):
         return TruncationBasedSummarizer()
     if name in ("model", "summary"):
