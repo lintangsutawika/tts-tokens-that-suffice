@@ -68,6 +68,10 @@ class SummarizingAgent(DefaultAgent):
         summarizer_style: str = "sectioned",
         mask_output: bool = True,
         mask_thinking: bool = False,
+        mask_keep_n: int = 10,
+        mask_tagged_keep: bool = True,
+        mask_long_output_chars: int = 5000,
+        mask_descriptive_placeholder: bool = True,
         progress_manager=None,
         instance_id: str = "",
         compressions_dir: Path | None = None,
@@ -87,6 +91,10 @@ class SummarizingAgent(DefaultAgent):
                 summarizer_style=summarizer_style,
                 mask_output=mask_output,
                 mask_thinking=mask_thinking,
+                mask_keep_n=mask_keep_n,
+                mask_tagged_keep=mask_tagged_keep,
+                mask_long_output_chars=mask_long_output_chars,
+                mask_descriptive_placeholder=mask_descriptive_placeholder,
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.
@@ -109,6 +117,9 @@ class SummarizingAgent(DefaultAgent):
         # Input context token length fed to the deliberator at each model call
         # (post-compression) — a per-turn series for plotting context growth.
         self.context_tokens: list[int] = []
+        # Actual input-prompt tokens the server reported on the last model call
+        # (None until the first response). Drives _context_tokens() when set.
+        self.last_prompt_tokens: int | None = None
         # Persist an explicit n_compressions=0 so a run with no compactions is
         # distinguishable from one with no count (only when compressions_dir set).
         if self.compressions_dir is not None:
@@ -119,20 +130,50 @@ class SummarizingAgent(DefaultAgent):
 
     def _agent_model_name(self) -> str:
         """The litellm model string this agent uses (default for the summarizer)."""
+        # Resolve the agent's own litellm model string across the model wrappers
+        # used by mini-swe-agent / harbor (LitellmModel.config.model_name,
+        # a bare .model_name, .name, or the repr). Raise loudly if we cannot
+        # resolve it — the subtask/model compactors REQUIRE summarizer_model, and
+        # a silent "" here leaves compactor=None (always False _should_compact).
         cfg = getattr(self.model, "config", None)
-        return (getattr(cfg, "model_name", None)
-                or getattr(self.model, "model_name", None)
-                or "")
+        name = (
+            getattr(cfg, "model_name", None)
+            or getattr(self.model, "model_name", None)
+            or getattr(self.model, "name", None)
+            or ""
+        )
+        if not name:
+            s = str(self.model).strip()
+            name = s if s and s.lower() not in ("<object>", "none", "") else ""
+        if not name:
+            raise ValueError(
+                "could not resolve the agent's model name for the summarizer; "
+                "set summarizer_model explicitly in the config"
+            )
+        return name
 
     # -- trigger -----------------------------------------------------------
 
     def _tokens_of(self, messages: list[dict]) -> int:
         text = "\n".join(message_text(m) for m in messages)
         if self.tokenizer is None:
-            return len(text) // 4  # crude fallback
+            # Conservative estimate that must NOT undercount: chars//4 undercounts
+            # code/JSON/tool-heavy content (real ratio can be ~3 chars/token) and
+            # misses the chat-template/role overhead per message, so compaction
+            # could fire too late and hit the serve's max_model_len (seen as
+            # ContextWindowExceededError on long agent channels). Use chars//3 for
+            # the text PLUS a small per-message overhead for role/format tokens.
+            return len(text) // 3 + 4 * len(messages)
         return len(self.tokenizer.encode(text))
 
     def _context_tokens(self) -> int:
+        # Prefer the ACTUAL input-token count the server reported on the last
+        # model call (message.extra.response.usage.prompt_tokens), avoiding the
+        # chars//4 estimate which undercounts code/tool-heavy contexts and
+        # delayed compaction (ContextWindowExceededError). Falls back to the
+        # estimate only before the first response has arrived.
+        if self.last_prompt_tokens is not None:
+            return self.last_prompt_tokens
         return self._tokens_of(self.messages)
 
     def _context_turns(self) -> int:
@@ -166,6 +207,19 @@ class SummarizingAgent(DefaultAgent):
             keep_first=self.keep_first,
             keep_last_turns=self.keep_last_turns,
         )
+        # No-reduction guard: if the compactor returned the same size (or larger)
+        # -- e.g. the subtask model marked everything in_progress -- do NOT count
+        # it as a compression or churn repeatedly. This prevents a no-op compactor
+        # from firing every turn while the context grows unbounded (seen as 64x
+        # no-op compactions -> ContextWindowExceededError).
+        tokens_after = self._tokens_of(result.messages)
+        if len(result.messages) >= n_before and tokens_after >= tokens_before:
+            logger.info(
+                f"{self._iid}: compaction no-op (no reduction: "
+                f"{n_before} msgs / {tokens_before} tok -> "
+                f"{len(result.messages)} msgs / {tokens_after} tok); skipping"
+            )
+            return
         if result.kind == "summary_failed":
             logger.warning(
                 f"{self._iid}: summarization failed "
@@ -179,7 +233,7 @@ class SummarizingAgent(DefaultAgent):
             "n_msgs_before": n_before,
             "n_msgs_after": len(result.messages),
             "tokens_before": tokens_before,
-            "tokens_after": self._tokens_of(result.messages),
+            "tokens_after": tokens_after,
             "summary": result.summary,
             "metadata": result.metadata,
             # The partial trajectory fed to the compactor (the pre-compression
@@ -197,8 +251,10 @@ class SummarizingAgent(DefaultAgent):
         self.messages = result.messages
 
     def _compression_subdir(self) -> Path:
-        """Per-trial subdir under compressions_dir (isolates concurrent trials)."""
-        return self.compressions_dir / str(self._iid)
+        # compressions_dir points at the container's per-trial /logs/agent
+        # (synced back to jobs/<run>/<trial>/agent/), so count.json lands
+        # directly in that dir -- no extra per-trial subdir needed.
+        return self.compressions_dir
 
     def _write_compression_count(self, n: int) -> None:
         """Persist the running n_compressions for this trial (best-effort)."""
@@ -211,7 +267,7 @@ class SummarizingAgent(DefaultAgent):
         if self.compressions_dir is None:
             return
         self.compressions_dir.mkdir(parents=True, exist_ok=True)
-        path = self.compressions_dir / f"compaction_{record['index']:03d}_{record['kind']}.json"
+        path = self.compressions_dir / f"compaction_{record['index']:03d}.json"
         path.write_text(json.dumps(record, indent=2))
         # Persist the running count (n_compressions) so it survives container
         # teardown and can be aggregated into result.json. Per-trial subdir so
@@ -229,7 +285,16 @@ class SummarizingAgent(DefaultAgent):
         # Record the input context length for this turn (the messages the
         # deliberator is about to be queried with, after any compression).
         self.context_tokens.append(self._tokens_of(self.messages))
-        return super().query()
+        msg = super().query()
+        # Capture the actual input-token count from the server's usage so the
+        # NEXT turn's compaction trigger uses the real context, not an estimate.
+        try:
+            usage = ((msg.get("extra") or {}).get("response") or {}).get("usage") or {}
+            if usage.get("prompt_tokens") is not None:
+                self.last_prompt_tokens = int(usage["prompt_tokens"])
+        except Exception:
+            pass
+        return msg
 
     def step(self) -> list[dict]:
         if self._pm is not None:

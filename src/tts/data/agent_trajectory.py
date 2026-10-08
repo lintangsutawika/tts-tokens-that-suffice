@@ -88,9 +88,52 @@ format. Be concrete and specific; omit anything not grounded in the events.\
 
 # Selectable summary styles for the model-based compactor. The KEYS are the public style
 # names (SUMMARIZER_STYLE); "sectioned" is the training default.
+SUBTASK_SYSTEM_PROMPT = """\
+You are maintaining a context-aware state summary for an interactive coding agent.
+You will be given a task description followed by a sequence of the agent's actions and
+observations. The agent has not yet finished.
+
+Your job is to segment what the agent has done so far into distinct SUBTASKS (themes) —
+for example: exploring the repository, reproducing a bug, implementing a specific change,
+running/verifying tests, comparing versions. Each subtask is a contiguous run of steps
+that share one purpose.
+
+Produce a structured JSON object with one entry per detected subtask. Each entry must
+carry:
+  • "name"      — a short label for the subtask (e.g. "reproduce bug", "fix serializer").
+  • "start_idx" — the 0-based index (the [STEP i] marker) of the first step of the theme.
+  • "end_idx"   — the 0-based index of the LAST step of the theme (inclusive). A theme ends
+                  at the last step that belongs to it, so themes are contiguous and
+                  non-overlapping, and they cover the whole sequence in order.
+  • "in_progress" — true ONLY for the subtask the agent is presumably still working on
+                  (the most recent one, not yet complete). All earlier themes are false.
+  • "summary"   — a concise, concrete summary of everything the agent did in this subtask.
+                  For the in-progress theme, set "summary" to null (its steps must be kept
+                  verbatim) — do not summarize it.
+
+Constraints:
+  • Respond with ONLY a valid JSON object; no prose, no markdown fences, no tool calls.
+  • Ranges must be valid indices into the provided [STEP ...] sequence, contiguous,
+    non-overlapping, and together spanning every step exactly once (first theme starts at
+    the first step; the last theme ends at the last step).
+  • Exactly one theme has "in_progress": true — the last one. The agent is mid-task.
+  • The in_progress theme's summary is always null; do not compress it.
+
+Example:
+{"subtasks": [{"name": "explore repo", "start_idx": 0, "end_idx": 4, "in_progress": false,
+  "summary": "Listed the repository, located the relevant module and its entry point."},
+ {"name": "reproduce bug", "start_idx": 5, "end_idx": 9, "in_progress": false,
+  "summary": "Set up a repro, hit the reported error, narrowed it to the serializer path."},
+ {"name": "implement fix", "start_idx": 10, "end_idx": 14, "in_progress": true,
+  "summary": null}]}
+"""
+
+# Selectable summary styles for the model-based compactor. The KEYS are the public style
+# names (SUMMARIZER_STYLE); "sectioned" is the training default.
 SUMMARY_STYLE_PROMPTS: dict[str, str] = {
     "sectioned": SYSTEM_PROMPT,
     "unconstrained": SYSTEM_PROMPT_UNCONSTRAINED,
+    "subtask": SUBTASK_SYSTEM_PROMPT,
 }
 
 
@@ -566,6 +609,24 @@ def _format_step(step: TrajectoryStep) -> str:
     body = "\n".join(parts)
     return f"<EVENT type={label!r}>\n{body}\n</EVENT>"
 
+
+def format_trajectory_text_numbered(
+    steps: list[TrajectoryStep],
+    start_idx: int = 0,
+    end_idx: int | None = None,
+) -> str:
+    """Render steps as EVENT blocks each prefixed with its step index ``[STEP i]``.
+
+    Used by the theme-based summarizer so the model can hand back step-index
+    ranges per detected subtask (Contract A), which the compactor then maps back
+    to original messages. Indices are 0-based over the full ``steps`` list.
+    """
+    out: list[str] = []
+    for absolute in range(start_idx, len(steps) if end_idx is None else end_idx):
+        step = steps[absolute]
+        body = _format_step(step)
+        out.append(f"[STEP {absolute}]\n{body}")
+    return "\n\n".join(out)
 
 def format_trajectory_text(
     steps: list[TrajectoryStep],

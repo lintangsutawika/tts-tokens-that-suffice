@@ -158,10 +158,10 @@ case "${USE_SUMMARIZER:-false}" in
 esac
 export JOB_NAME="${JOB_NAME:-${BENCH}-${VLLM_MODEL//\//--}${_SUM_TAG}-run-${RUN}}"
 
-# --- Per-model vLLM serve params (serve/models/<repo>.json) ----------------------
+# --- Per-model vLLM serve params (configs/serve/<repo>.json) ----------------------
 # Model-INTRINSIC serving flags -- tool/reasoning parsers, speculative decoding,
-# context length -- live in serve/models/<VLLM_MODEL>.json, auto-selected here. This
-# is the SERVING analogue of harbor/configs/<repo>.yaml (agent sampling): the correct
+# context length -- live in configs/serve/<VLLM_MODEL>.json, auto-selected here. This
+# is the SERVING analogue of configs/sampling/<repo>.yaml (agent sampling): the correct
 # flags travel WITH the model, because the wrong tool-call parser silently zeroes the
 # eval (memory: vllm-tool-parser-gotcha). Node/accelerator knobs (TP/DP, backend,
 # gpu-mem, sif) stay OUT of this file -- the same model serves on different hardware.
@@ -170,7 +170,7 @@ export JOB_NAME="${JOB_NAME:-${BENCH}-${VLLM_MODEL//\//--}${_SUM_TAG}-run-${RUN}
 # present in the JSON; the `:-` defaults below remain the fallback when no file
 # matches (so an unconfigured Qwen run behaves exactly as before). Override the path
 # with VLLM_SERVE_CONFIG.
-VLLM_SERVE_CONFIG="${VLLM_SERVE_CONFIG:-serve/models/${VLLM_MODEL}.json}"
+VLLM_SERVE_CONFIG="${VLLM_SERVE_CONFIG:-configs/serve/${VLLM_MODEL}.json}"
 if [ -f "${VLLM_SERVE_CONFIG}" ]; then
     echo "[serve] loading vLLM serve params from ${VLLM_SERVE_CONFIG}"
     eval "$(python3 - "${VLLM_SERVE_CONFIG}" <<'PY'
@@ -218,7 +218,7 @@ VLLM_API_KEY="${VLLM_API_KEY:-EMPTY}"
 #   rocm-mi300  -> apptainer --rocm on MI300X/gfx942 (AITER + FP8 MFMA + ROCM_AITER_FA)
 #   rocm-mi250  -> apptainer --rocm on MI250X/gfx90a (Triton FA; no AITER/FP8-MFMA)
 #   llama-cpp   -> apptainer --nv from LLAMA_CPP_SIF (llama-server, GGUF quants; the
-#                  serve flags come from serve/models/<repo>.json's llama_server_args)
+#                  serve flags come from configs/serve/<repo>.json's llama_server_args)
 # The two ROCm variants mirror scripts/serve/vllm-MI300.sh / vllm-MI250.sh.
 SERVE_BACKEND="${SERVE_BACKEND:-cuda}"
 # Startup /health poll budget (tries x 5s). vLLM loads in minutes; a first-run
@@ -416,7 +416,7 @@ if [ "${SERVE_VLLM}" = "1" ]; then
         # NVIDIA analog of the rocm-mi300 path: serve inside the CUDA vLLM container
         # (apptainer --nv) from VLLM_CUDA_SIF (server/scripts/build-cuda.sh). No ROCm/
         # AITER env; --nv exposes the GPUs + driver. Model-intrinsic flags (parsers,
-        # spec, attention backend) ride in VLLM_EXTRA_ARGS from serve/models/<repo>.json
+        # spec, attention backend) ride in VLLM_EXTRA_ARGS from configs/serve/<repo>.json
         # -- NOT the rocm-only ROCM_SERVE_EXTRA. ROCM_CACHE_BASE is reused as a generic
         # host cache dir so HF weights persist. If the site's apptainer needs its
         # default binds stripped (e.g. a failing /scratch bind), pass extra flags via
@@ -513,7 +513,7 @@ if [ "${SERVE_VLLM}" = "1" ]; then
         # GGUF quants (e.g. unsloth/GLM-5.3-Flash-GGUF) via llama.cpp's llama-server
         # inside the CUDA container (apptainer --nv) from LLAMA_CPP_SIF
         # (server/scripts/build-llama-cpp.sh). NOT vLLM: the serve flags are
-        # LLAMA_SERVER_ARGS from serve/models/<repo>.json's llama_server_args (-hf,
+        # LLAMA_SERVER_ARGS from configs/serve/<repo>.json's llama_server_args (-hf,
         # -ngl, -c, --jinja, ...). This sbatch owns --host/--port/--alias so the port
         # matches the dynamically-picked VLLM_PORT and /v1/models advertises the name
         # harbor calls it by. TP/DP don't apply (llama.cpp splits the GGUF across the
@@ -522,7 +522,7 @@ if [ "${SERVE_VLLM}" = "1" ]; then
         # analogue of the vLLM tool-parser gotcha).
         if [ -z "${LLAMA_SERVER_ARGS:-}" ]; then
             echo "ERROR: SERVE_BACKEND=llama-cpp but no LLAMA_SERVER_ARGS (need" \
-                 "serve/models/${VLLM_MODEL}.json with llama_server_args, or set it)" >&2
+                 "configs/serve/${VLLM_MODEL}.json with llama_server_args, or set it)" >&2
             exit 2
         fi
         mkdir -p "${ROCM_CACHE_BASE}/hf_cache" "${ROCM_CACHE_BASE}/tmp" "${APPTAINER_TMPDIR}"

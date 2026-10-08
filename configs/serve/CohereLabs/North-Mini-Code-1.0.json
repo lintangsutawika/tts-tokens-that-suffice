@@ -1,0 +1,26 @@
+{
+  "_model": "CohereLabs/North-Mini-Code-1.0",
+  "_note": "North Mini Code (30B-A3B Cohere2 MoE, 128 experts top-8), Cohere agentic coding model with interleaved thinking. Card-reported SWE-bench Verified 67.6%.",
+  "_note_serve": "Per the model card: vllm serve CohereLabs/North-Mini-Code-1.0 -tp 2 --max-model-len 320000 --tool-call-parser cohere_command4 --reasoning-parser cohere_command4 --enable-auto-tool-choice. Requires vLLM MAIN (not a release) + cohere_melody>=0.9.0 for response parsing. The repo's scoring server (scripts/serve/north.sh) uses --max-model-len 65536 --language-model-only --tool-call-parser cohere_command4 --reasoning-parser cohere_command4; a full SWE-bench run should use the card's 320000 window. Text-only -> --language-model-only. Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--max-num-batched-tokens",
+    "32768",
+    "--enable-prefix-caching",
+    "--long-prefill-token-threshold",
+    "0",
+    "--enforce-eager",
+    "--enable-auto-tool-choice",
+    "--language-model-only",
+    "--tool-call-parser",
+    "cohere_command4",
+    "--reasoning-parser",
+    "cohere_command4",
+    "--trust-remote-code"
+  ],
+  "spec_config": null,
+  "max_model_len": 262144,
+  "native_max_context": 262144,
+  "_note_context": "Served window (max_model_len) capped at 262144 (card native is 256K ctx / 64K out). Pass MAX_MODEL_LEN=262144 in the qsub env (sbatch default is 131072). Uses vLLM MAIN + cohere_melody -- see server/scripts/north-vllm.def for the ROCm build; must be served from that image.",
+  "_status": "UNVERIFIED -- needs vLLM MAIN + cohere_melody in the serve image (not the stock 0.28.0 SIF). Confirm tool calls parse before a real run (vLLM tool-parser gotcha)."
+}

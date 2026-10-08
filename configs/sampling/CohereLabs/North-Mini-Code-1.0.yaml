@@ -1,0 +1,29 @@
+# mini-swe-agent sampling for CohereLabs/North-Mini-Code-1.0 (self-hosted vLLM).
+#
+# Selected automatically by harbor_eval.sh from MODEL: harbor/configs/<repo>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# North Mini Code (30B-A3B Cohere2 MoE, 128 experts top-8) is Cohere's agentic
+# coding model with INTERLEAVED THINKING + tool use. The card's recommended/most
+# recent sampling: temperature 1.0, top_p 0.95 (the card's benchmarks run at
+# temp 1.0 / top_p 0.95). Interleaved thinking works best when ON -- Cohere
+# recommends passing model-generated thinking to all future turns; we enable it
+# via the reasoning/thinking path (see SERVING). drop_params keeps litellm from
+# erroring on non-OpenAI-schema params.
+#
+# SERVING (see scripts/serve/north.sh + serve/models/CohereLabs/..): needs
+# --tool-call-parser cohere_command4 --reasoning-parser cohere_command4
+# --enable-auto-tool-choice, and the cohere_melody package for accurate response
+# parsing. The card's vllm command is `-tp 2 --max-model-len 320000`; the repo's
+# scoring-server north.sh uses --max-model-len 65536 --language-model-only. For a
+# full SWE-bench run use the card's 320000 window (text-only, so add
+# --language-model-only). Wrong tool parser silently zeroes the eval (memory:
+# vllm-tool-parser-gotcha). Card-reported SWE-bench Verified 67.6% (vs Laguna's
+# comparison table).
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    drop_params: true

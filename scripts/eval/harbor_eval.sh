@@ -4,6 +4,7 @@
 #   1. SWE-bench Verified   -> swe-bench/swe-bench-verified          (500, test-graded)
 #   2. SWE-bench Pro        -> scale-ai/swe-bench-pro                (731, test-graded)
 #   3. Senior SWE-bench     -> snorkel-ai/senior-swe-bench-v2026.06  ( 50, LLM-judge)
+#   4. Terminal-Bench 2.1   -> terminal-bench/terminal-bench-2-1     ( 89, graded)
 #
 # All three are pre-published Harbor datasets (no adapter needed). Harbor installs
 # mini-swe-agent inside a Modal sandbox per task, the agent solves it by calling
@@ -51,7 +52,7 @@ _PRESET_API_KEY="${DELIBERATOR_API_KEY:-}"
 
 BENCH="${1:-${BENCH:-}}"
 if [ -z "${BENCH}" ]; then
-    echo "usage: scripts/eval/harbor_eval.sh <verified|pro|senior>" >&2
+    echo "usage: scripts/eval/harbor_eval.sh <verified|pro|senior|terminal>" >&2
     exit 2
 fi
 
@@ -59,7 +60,8 @@ case "${BENCH}" in
     verified) DATASET="swe-bench/swe-bench-verified" ;;
     pro)      DATASET="scale-ai/swe-bench-pro" ;;
     senior)   DATASET="snorkel-ai/senior-swe-bench-v2026.06" ;;
-    *) echo "unknown benchmark '${BENCH}' (want verified|pro|senior)" >&2; exit 2 ;;
+    terminal) DATASET="terminal-bench/terminal-bench-2-1" ;;
+    *) echo "unknown benchmark '${BENCH}' (want verified|pro|senior|terminal)" >&2; exit 2 ;;
 esac
 
 # --- Deliberator (task-solving model) -------------------------------------------
@@ -85,12 +87,12 @@ LITELLM_MODEL="${LITELLM_PROVIDER}/${MODEL}"
 DELIBERATOR_BASE_URL="${DELIBERATOR_BASE_URL:-}"
 # vLLM ignores the key's value but mini-swe-agent requires a non-empty key.
 DELIBERATOR_API_KEY="${DELIBERATOR_API_KEY:-EMPTY}"
-# Per-model sampling config lives in harbor/configs/<MODEL>.yaml (MODEL is the bare
+# Per-model sampling config lives in configs/sampling/<MODEL>.yaml (MODEL is the bare
 # repo). So MODEL=zai-org/GLM-4.7-Flash auto-selects
-# harbor/configs/zai-org/GLM-4.7-Flash.yaml. Add a new model by dropping a yaml at that
+# configs/sampling/zai-org/GLM-4.7-Flash.yaml. Add a new model by dropping a yaml at that
 # path (see the existing ones for the sampling + required serving flags). Override
 # MINI_CONFIG to force a specific file (e.g. the legacy harbor/mini_qwen.yaml).
-MINI_CONFIG="${MINI_CONFIG:-harbor/configs/${MODEL}.yaml}"
+MINI_CONFIG="${MINI_CONFIG:-configs/sampling/${MODEL}.yaml}"
 
 if [ -z "${DELIBERATOR_BASE_URL}" ]; then
     echo "ERROR: set DELIBERATOR_BASE_URL to a PUBLIC OpenAI-compatible endpoint" >&2
@@ -100,9 +102,9 @@ fi
 
 if [ ! -f "${MINI_CONFIG}" ]; then
     echo "ERROR: sampling config not found: ${MINI_CONFIG}" >&2
-    echo "       (auto-derived from MODEL=${MODEL}). Add it under harbor/configs/," >&2
+    echo "       (auto-derived from MODEL=${MODEL}). Add it under configs/sampling/," >&2
     echo "       or set MINI_CONFIG explicitly. Available configs:" >&2
-    find harbor/configs -name '*.yaml' 2>/dev/null | sort | sed 's/^/         /' >&2
+    find configs/sampling -name '*.yaml' 2>/dev/null | sort | sed 's/^/         /' >&2
     exit 2
 fi
 
@@ -115,11 +117,15 @@ fi
 _is_true() { case "${1:-}" in true|True|TRUE|1|yes|on) return 0 ;; *) return 1 ;; esac; }
 USE_SUMMARIZER="${USE_SUMMARIZER:-false}"
 SUMMARIZER_COMPACTOR="${SUMMARIZER_COMPACTOR:-mask}"            # mask | truncation | model | none
-SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model only: sectioned | unconstrained
+SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model: sectioned|unconstrained; subtask: subtask
 SUMMARIZER_TRIGGER_TOKENS="${SUMMARIZER_TRIGGER_TOKENS:-64000}"
 SUMMARIZER_KEEP_FIRST="${SUMMARIZER_KEEP_FIRST:-4}"
 SUMMARIZER_KEEP_LAST_TURNS="${SUMMARIZER_KEEP_LAST_TURNS:-3}"
-SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-}"                        # empty => reuse the agent's own model
+# The summarizer model defaults to the agent's own model (LITELLM_MODEL =
+# <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
+# summarizer_model (make_compactor("subtask") hard-fails without it). Users may
+# override SUMMARIZER_MODEL to point the summarizer at a different model.
+SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-${LITELLM_MODEL}}"
 # Host path bound into the task container (this repo's src/) and the mountpoint it appears
 # at (also the agent's PYTHONPATH). src/ lives on shared FS -> valid on every node, so it
 # bakes cleanly into the resumed job config.
@@ -139,9 +145,10 @@ _SUM_TAG=""
 if _is_true "${USE_SUMMARIZER}"; then
     _trig="${SUMMARIZER_TRIGGER_TOKENS}"; case "${_trig}" in *000) _trig="$((_trig/1000))k" ;; esac
     _cmp="${SUMMARIZER_COMPACTOR}"
-    # For model, the summary STYLE is part of the identity (own dir/run); mask/truncation
-    # have no style.
-    [ "${_cmp}" = "model" ] && _cmp="model-${SUMMARIZER_STYLE}"
+    # For model/subtask, the summary STYLE is part of the identity (own dir/run);
+    # mask/truncation have no style.
+    if [ "${_cmp}" = "model" ]; then _cmp="model-${SUMMARIZER_STYLE}"
+    elif [ "${_cmp}" = "subtask" ]; then _cmp="subtask"; fi
     _SUM_TAG="-sum-${_cmp}-${_trig}"
 fi
 
@@ -159,7 +166,7 @@ case "${BENCH}" in
     *)        STEP_LIMIT="${STEP_LIMIT:-}" ;;
 esac
 if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
-    _GEN_DIR="harbor/configs/.generated"
+    _GEN_DIR="configs/sampling/.generated"
     mkdir -p "${_GEN_DIR}"
     _EFF_CONFIG="${_GEN_DIR}/$(printf '%s' "${BENCH}-${MODEL}${_SUM_TAG}" | tr '/ ' '__').yaml"
     # ONE appended agent: block carries the step cap AND (when enabled) the summarizer
@@ -167,21 +174,26 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
     # disjoint, so this overrides only these keys and keeps mini's system_template etc.
     {
         cat "${MINI_CONFIG}"
-        printf '\n# injected by harbor_eval.sh (BENCH=%s)\nagent:\n' "${BENCH}"
+        printf '\n# injected by harbor_eval.sh (BENCH=%s)\n' "${BENCH}"
+        # Cap per-turn generation tokens for all models (bounded gen, prevents
+        # unbounded output / context blow-up). Set MAX_TOKENS (e.g. 32768); empty
+        # leaves the model/litellm default (unbounded). Merge-safe (mini deep-merges
+        # model.* across -c files).
+        if [ -n "${MAX_TOKENS:-}" ]; then
+            printf 'model:\n  model_kwargs:\n    max_tokens: %s\n' "${MAX_TOKENS}"
+        fi
+        printf 'agent:\n'
         [ -n "${STEP_LIMIT}" ] && printf '  step_limit: %s\n' "${STEP_LIMIT}"
         if _is_true "${USE_SUMMARIZER}"; then
             printf '  agent_class: tts.agent.summarization_agent.SummarizingAgent\n'
             printf '  compactor: %s\n' "${SUMMARIZER_COMPACTOR}"
             [ "${SUMMARIZER_COMPACTOR}" = "model" ] && printf '  summarizer_style: %s\n' "${SUMMARIZER_STYLE}"
+            [ "${SUMMARIZER_COMPACTOR}" = "subtask" ] && printf '  summarizer_style: subtask\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
             [ -n "${SUMMARIZER_MODEL}" ] && printf '  summarizer_model: %s\n' "${SUMMARIZER_MODEL}"
-            # Per-trial compaction records (and running n_compressions). Landing
-            # under the bind-mounted src/ keeps them on shared FS so they survive
-            # container teardown and can be aggregated into result.json. Scoped per
-            # run (JOB_NAME from sbatch; standalone falls back to the config name).
-            printf '  compressions_dir: %s\n' "${TTS_SRC}/.compressions/${JOB_NAME:-$(basename "${_EFF_CONFIG}" .yaml)}"
+            printf '  compressions_dir: /logs/agent\n'  # -> jobs/<run>/<trial>/agent/count.json (harbor syncs /logs/agent -> trial agent dir)
         fi
     } > "${_EFF_CONFIG}"
     echo "[config] BENCH=${BENCH}: step_limit=${STEP_LIMIT:-<none>}$(_is_true "${USE_SUMMARIZER}" && printf ' summarizer=%s@%stok' "${SUMMARIZER_COMPACTOR}" "${SUMMARIZER_TRIGGER_TOKENS}") -> ${_EFF_CONFIG}"
