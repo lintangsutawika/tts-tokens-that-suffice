@@ -36,7 +36,7 @@ def make_compactor(
     summarizer_style: str = "sectioned",
     mask_output: bool = True,
     mask_thinking: bool = False,
-    mask_keep_n: int = 10,
+    mask_keep_n: int = 0,
     mask_tagged_keep: bool = True,
     mask_long_output_chars: int = 5000,
     mask_descriptive_placeholder: bool = True,
