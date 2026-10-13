@@ -1,0 +1,23 @@
+# mini-swe-agent sampling for azure_ai/Kimi-K2.5 (external CMU ai-gateway).
+#
+# Selected automatically by harbor_eval.sh from MODEL: configs/sampling/<MODEL>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# Kimi K2.5 (Moonshot) is a 1T-parameter / 32B-active native multimodal MoE. The
+# model card recommends temperature = 1.0, top_p = 0.95 for evaluation. Served
+# EXTERNALLY via the CMU ai-gateway (https://ai-gateway.andrew.cmu.edu), so:
+#   * NO local vLLM serve -- run with DELIBERATOR_BASE_URL set + a CPU node
+#     (RTYPE=rt_HC). The gateway is OpenAI-compatible (a litellm proxy).
+#   * drop_params keeps litellm from erroring on non-OpenAI-schema params.
+#   * max_tokens caps each agent turn (16k, matching the other models).
+#
+# RUN: MODEL=azure_ai/Kimi-K2.5 DELIBERATOR_BASE_URL=https://ai-gateway.andrew.cmu.edu/v1 \
+#        DELIBERATOR_API_KEY=sk-... ENV=modal N_TASKS=2 \
+#      qsub ... -v RTYPE=rt_HC ... scripts/eval/harbor_eval.sbatch
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    drop_params: true
