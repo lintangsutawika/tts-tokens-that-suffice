@@ -1,0 +1,22 @@
+# mini-swe-agent sampling for azure_ai/Kimi-K2.6 (external CMU ai-gateway).
+#
+# Selected automatically by harbor_eval.sh from MODEL: configs/sampling/<MODEL>.yaml.
+# Model name MUST match the gateway exactly: "azure_ai/Kimi-K2.6" (the TEST_LLM_API_KEY
+# is entitled to this; the FW- / lowercase kimi- variants are NOT).
+#
+# Kimi K2.6 (Moonshot reasoning MoE) shares the Kimi card's evaluation sampling:
+# temperature 1.0 / top_p 0.95. It emits reasoning_content + content. max_tokens
+# caps each agent turn (16k, matching the harness); drop_params keeps litellm from
+# erroring on non-OpenAI-schema params.
+#
+# RUN (no local vLLM; CPU node is fine):
+#   MODEL=azure_ai/Kimi-K2.6 DELIBERATOR_BASE_URL=https://ai-gateway.andrew.cmu.edu/v1 \
+#       DELIBERATOR_API_KEY=sk-... LITELLM_PROXY_API_KEY=sk-... (the gateway key) \
+#       ENV=modal \
+#   qsub ... -v RTYPE=rt_HC ... scripts/eval/harbor_eval.sbatch
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    drop_params: true
