@@ -133,6 +133,20 @@ MODEL="${MODEL:-${VLLM_MODEL:-Qwen/Qwen3.6-35B-A3B}}"
 case "${MODEL}" in openai/*/*) MODEL="${MODEL#openai/}" ;; esac   # tolerate litellm prefix
 VLLM_MODEL="${MODEL}"          # what `vllm serve` gets (bare HF repo)
 export MODEL                   # harbor_eval.sh re-derives litellm/config paths identically
+# --- External (no local vLLM) model convenience: azure_ai/... via the CMU gateway ---
+# When MODEL is a remote provider model (e.g. MODEL=azure_ai/FW-GLM-5.3 or
+# MODEL=azure_ai/Kimi-K2.6), there is no local serve -- set DELIBERATOR_BASE_URL to the
+# gateway and reuse TEST_LLM_API_KEY (from .env) for the key by default.
+case "${MODEL}" in
+    azure_ai/*|litellm_proxy/azure_ai/*)
+        DELIBERATOR_BASE_URL="${DELIBERATOR_BASE_URL:-https://ai-gateway.andrew.cmu.edu/v1}"
+        if [ -z "${DELIBERATOR_API_KEY:-}" ] && [ -n "${TEST_LLM_API_KEY:-}" ]; then
+            DELIBERATOR_API_KEY="${TEST_LLM_API_KEY}"
+            LITELLM_PROXY_API_KEY="${TEST_LLM_API_KEY}"
+            OPENAI_API_KEY="${TEST_LLM_API_KEY}"
+            export DELIBERATOR_API_KEY LITELLM_PROXY_API_KEY OPENAI_API_KEY
+        fi ;;
+esac
 
 # Deterministic default JOB_NAME: <bench>-<model repo, / -> -->-run-<RUN> -- e.g.
 # verified-zai-org--GLM-4.7-Flash-run-0. RUN defaults to 0; bump RUN=1,2,... for repeat
