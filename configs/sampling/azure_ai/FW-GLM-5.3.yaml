@@ -1,0 +1,24 @@
+# mini-swe-agent sampling for azure_ai/FW-GLM-5.3 (external CMU ai-gateway).
+#
+# Selected automatically by harbor_eval.sh from MODEL: configs/sampling/<MODEL>.yaml.
+# Model name here must match the gateway (azure_ai/FW-GLM-5.3 resolves via liteLLM
+# passthrough to the CMU ai-gateway at https://ai-gateway.andrew.cmu.edu).
+#
+# GLM-5.3 is Z.ai's frontier reasoning model. The card's evaluation uses
+# temperature 1.0 / top_p 0.95 (HLE/tools). GLM-5.3-Flash adds reasoning_effort
+# "max" for agentic coding -- set via the card's `reasoning`/reasoning_effort
+# mechanism if your provider exposes it. max_tokens caps each agent turn (16k,
+# matching the harness); drop_params keeps litellm from erroring on non-schema
+# params.
+#
+# RUN (no local vLLM; CPU node is fine):
+#   MODEL=azure_ai/FW-GLM-5.3 DELIBERATOR_BASE_URL=https://ai-gateway.andrew.cmu.edu/v1 \
+#       DELIBERATOR_API_KEY=sk-... LITELLM_PROXY_API_KEY=sk-... (the gateway key) \
+#       ENV=modal \
+#   qsub ... -v RTYPE=rt_HC ... scripts/eval/harbor_eval.sbatch
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    drop_params: true
