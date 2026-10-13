@@ -140,6 +140,10 @@ export MODEL                   # harbor_eval.sh re-derives litellm/config paths 
 case "${MODEL}" in
     azure_ai/*|litellm_proxy/azure_ai/*)
         DELIBERATOR_BASE_URL="${DELIBERATOR_BASE_URL:-https://ai-gateway.andrew.cmu.edu/v1}"
+        # FORCE no local serve: azure_ai/* are external gateway models (no GPU vLLM).
+        # Must override SERVE_VLLM here -- the early default (line ~111) pins it to 1
+        # before this block, and SERVE_VLLMs :- default later wont unset it.
+        SERVE_VLLM=0; export SERVE_VLLM
         if [ -z "${DELIBERATOR_API_KEY:-}" ] && [ -n "${TEST_LLM_API_KEY:-}" ]; then
             DELIBERATOR_API_KEY="${TEST_LLM_API_KEY}"
             LITELLM_PROXY_API_KEY="${TEST_LLM_API_KEY}"
