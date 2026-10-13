@@ -1,0 +1,26 @@
+# mini-swe-agent sampling for FW-Kimi-K2.5 (external CMU ai-gateway).
+#
+# Selected automatically by harbor_eval.sh from MODEL: configs/sampling/<MODEL>.yaml.
+# Harbor runs `mini-swe-agent --yolo -c mini -c <this file> ...`; `-c mini` is the
+# base scaffold and this file recursive-merges the sampling knobs on top.
+#
+# Kimi K2.5 (Moonshot 1T/32B-active native multimodal MoE) is served EXTERNALLY
+# via the CMU ai-gateway (https://ai-gateway.andrew.cmu.edu), an OpenAI-compatible
+# litellm proxy, under the model name "FW-Kimi-K2.5". The model card recommends
+# temperature = 1.0, top_p = 0.95 for evaluation.
+#
+# RUN (no local vLLM; CPU node is fine):
+#   MODEL=FW-Kimi-K2.5 DELIBERATOR_BASE_URL=https://ai-gateway.andrew.cmu.edu/v1 \
+#       DELIBERATOR_API_KEY=sk-... LITELLM_PROXY_API_KEY=sk-... (the gateway key) \
+#       ENV=modal \
+#   qsub ... -v RTYPE=rt_HC ... scripts/eval/harbor_eval.sbatch
+#
+# NOTE: the model name here MUST match the gateway's (FW-Kimi-K2.5). Also set
+# LITELLM_PROXY_API_KEY explicitly -- .env historically carried a stale key that
+# leaked through the ${LITELLM_PROXY_API_KEY} runtime template.
+model:
+  model_kwargs:
+    temperature: 1.0
+    top_p: 0.95
+    max_tokens: 16384
+    drop_params: true
