@@ -148,6 +148,15 @@ case "${MODEL}" in
         fi ;;
 esac
 
+# Serve decision (after external-model default above): DELIBERATOR_BASE_URL set ->
+# use external endpoint (no local vLLM); else serve locally. SERVE_VLLM=1/0 forces.
+if [ -n "${DELIBERATOR_BASE_URL}" ]; then
+    SERVE_DEFAULT=0
+else
+    SERVE_DEFAULT=1
+fi
+SERVE_VLLM="${SERVE_VLLM:-${SERVE_DEFAULT}}"
+
 # Deterministic default JOB_NAME: <bench>-<model repo, / -> -->-run-<RUN> -- e.g.
 # verified-zai-org--GLM-4.7-Flash-run-0. RUN defaults to 0; bump RUN=1,2,... for repeat
 # runs of the same data+model. It MUST be deterministic: a resumed 4h chunk reproduces
