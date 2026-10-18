@@ -176,8 +176,16 @@ class SubtaskModelBasedSummarizer:
         kept_progress_msgs = 0
         meta_subtasks = []
         for t in themes:
-            start = int(t.get("start_idx", 0))
-            end = int(t.get("end_idx", start))
+            # Tolerate None/malformed indices: GLM and smaller summarizers return
+            # themes with start_idx/end_idx=None, which int() rejects -> the whole
+            # compaction crashes -> the agent command exits non-zero. Fall back to a
+            # safe default instead (0 / start) so a slightly-off theme still works.
+            def _idx(v, default):
+                if v is None: return default
+                try: return int(v)
+                except (TypeError, ValueError): return default
+            start = _idx(t.get("start_idx"), 0)
+            end = _idx(t.get("end_idx"), start)
             # clamp both bounds to valid range (model can return out-of-range)
             start = max(0, min(n_steps - 1, start))
             end = max(0, min(n_steps - 1, end))
@@ -220,8 +228,8 @@ class SubtaskModelBasedSummarizer:
             blocks = [b for b in blocks if b is not None]
             # safe: re-keep only the RECENT tail of the last theme (bounded like the
             # in_progress branch) so a degenerate no-in_progress model still compresses.
-            start = int(last.get("start_idx", 0))
-            end = int(last.get("end_idx", start))
+            start = int(last.get("start_idx", 0)) if last.get("start_idx") is not None else 0
+            end = int(last.get("end_idx", start)) if last.get("end_idx") is not None else start
             start = max(0, min(n_steps - 1, start))
             end = max(0, min(n_steps - 1, end))
             total = end - start + 1
