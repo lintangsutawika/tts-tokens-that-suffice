@@ -72,7 +72,12 @@ class ObsSummarySummarizer:
             kwargs["api_key"] = self.api_key
         try:
             resp = litellm.completion(**kwargs)
-            text = resp.choices[0].message.content.strip()
+            msg = resp.choices[0].message
+            # GLM (and reasoning models) often return content=None and put the
+            # text in reasoning_content; fall back to it.
+            text = msg.content if msg.content else (getattr(msg, "reasoning_content", None) or "")
+            if not isinstance(text, str): text = str(text)
+            text = text.strip()
             if not text:
                 return ""
             return OBS_PREFIX + text
