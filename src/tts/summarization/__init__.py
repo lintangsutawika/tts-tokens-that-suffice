@@ -12,6 +12,7 @@ harbor) that can only carry scalars, not a constructed object.
 """
 from .cliff_based import CliffCompactor
 from .mask_based import MaskBasedSummarizer
+from .obs_based import ObservationSummaryCompactor, ObsSummarySummarizer
 from .model_based import ModelBasedSummarizer
 from .subtask_based import SubtaskModelBasedSummarizer
 from .truncation_based import TruncationBasedSummarizer
@@ -96,6 +97,20 @@ def make_compactor(
         )
     if name in ("cliff", "cliffcompaction"):
         return CliffCompactor()
+    if name in ("obs", "observation"):
+        # per-observation LLM summarizer: keeps the agent's assistant turns
+        # verbatim, summarizes each tool/observation into "[Compacted Obs] ...".
+        from .obs_based import ObsSummarySummarizer, ObservationSummaryCompactor
+        if not summarizer_model:
+            raise ValueError("compactor='obs' requires summarizer_model")
+        return ObservationSummaryCompactor(
+            ObsSummarySummarizer(
+                summarizer_model,
+                api_base=summarizer_api_base,
+                api_key=summarizer_api_key,
+                max_tokens=min(summarizer_max_tokens, 128),
+            )
+        )
     raise ValueError(
         f"unknown compactor {name!r} (mask|truncation|model|theme|cliff|none)"
     )
