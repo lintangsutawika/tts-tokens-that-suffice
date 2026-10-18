@@ -458,7 +458,7 @@ if _is_true "${USE_SUMMARIZER}"; then
     if ! [ -d "${TTS_DEP_TARGET}/cliffcompaction" ] || ! [ -d "${TTS_DEP_TARGET}/mcp" ]; then
         echo "[env] installing deps (cliffcompaction, mcp) -> ${TTS_DEP_TARGET} (for USE_SUMMARIZER in-container)"
         mkdir -p "${TTS_DEP_TARGET}"
-        uv pip install --quiet --python "${TTS_SRC}/../.venv/bin/python" \
+        uv pip install --quiet --no-deps --python "${TTS_SRC}/../.venv/bin/python" \
             --target "${TTS_DEP_TARGET}" "cliffcompaction>=0.1.0" "mcp" >/dev/null 2>&1 \
           || echo "WARNING: could not install deps into ${TTS_DEP_TARGET}; summarizer/cliff will fail in-container" >&2
     fi
