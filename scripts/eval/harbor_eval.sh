@@ -450,15 +450,17 @@ if _is_true "${USE_SUMMARIZER}"; then
     # project venv but NOT in the container's mini-swe tool venv). Install it into
     # a target dir inside the bind-mounted src/ so the agent venv can import it,
     # without forking harbor or vendoring the package. Idempotent; shared FS.
-    if [ "${SUMMARIZER_COMPACTOR:-mask}" = "cliff" ]; then
-        TTS_DEP_TARGET="${TTS_SRC}/.deps"
-        if ! [ -d "${TTS_DEP_TARGET}/cliffcompaction" ]; then
-            echo "[env] installing cliffcompaction -> ${TTS_DEP_TARGET} (for compactor=cliff in-container)"
-            mkdir -p "${TTS_DEP_TARGET}"
-            uv pip install --quiet --python "${TTS_SRC}/../.venv/bin/python" \
-                --target "${TTS_DEP_TARGET}" "cliffcompaction>=0.1.0" >/dev/null 2>&1 \
-              || echo "WARNING: could not install cliffcompaction into ${TTS_DEP_TARGET}; compactor=cliff will fail in-container" >&2
-        fi
+    # Deps the container mini-swe tool venv needs that the project venv has but the
+    # task image does NOT: cliffcompaction (compactor=cliff) and mcp (tenacity in
+    # the sandbox imports tenacity.mcp on retry -> crashes if mcp absent). Install
+    # them into the bind-mounted src/.deps so the agent venv can import them.
+    TTS_DEP_TARGET="${TTS_SRC}/.deps"
+    if ! [ -d "${TTS_DEP_TARGET}/cliffcompaction" ] || ! [ -d "${TTS_DEP_TARGET}/mcp" ]; then
+        echo "[env] installing deps (cliffcompaction, mcp) -> ${TTS_DEP_TARGET} (for USE_SUMMARIZER in-container)"
+        mkdir -p "${TTS_DEP_TARGET}"
+        uv pip install --quiet --python "${TTS_SRC}/../.venv/bin/python" \
+            --target "${TTS_DEP_TARGET}" "cliffcompaction>=0.1.0" "mcp" >/dev/null 2>&1 \
+          || echo "WARNING: could not install deps into ${TTS_DEP_TARGET}; summarizer/cliff will fail in-container" >&2
     fi
     # Point the agent at the bound src AND its .deps (cliffcompaction etc.), so the
     # container's mini-swe tool venv can import packages the project venv has.
