@@ -121,6 +121,11 @@ SUMMARIZER_STYLE="${SUMMARIZER_STYLE:-sectioned}"              # model: sectione
 SUMMARIZER_TRIGGER_TOKENS="${SUMMARIZER_TRIGGER_TOKENS:-64000}"
 SUMMARIZER_KEEP_FIRST="${SUMMARIZER_KEEP_FIRST:-4}"
 SUMMARIZER_KEEP_LAST_TURNS="${SUMMARIZER_KEEP_LAST_TURNS:-3}"
+# mask: how many trailing TOOL outputs in the compacted middle stay verbatim
+# (mask_keep_n). Kept small (2) so small-context mask runs don't over-preserve;
+# distinct from keep_last_turns (keeping whole recent turns). Only used when
+# SUMMARIZER_COMPACTOR=mask.
+SUMMARIZER_KEEP_N="${SUMMARIZER_KEEP_N:-2}"
 # The summarizer model defaults to the agent's own model (LITELLM_MODEL =
 # <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
 # summarizer_model (make_compactor("subtask") hard-fails without it). Users may
@@ -189,6 +194,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             printf '  compactor: %s\n' "${SUMMARIZER_COMPACTOR}"
             [ "${SUMMARIZER_COMPACTOR}" = "model" ] && printf '  summarizer_style: %s\n' "${SUMMARIZER_STYLE}"
             [ "${SUMMARIZER_COMPACTOR}" = "subtask" ] && printf '  summarizer_style: subtask\n'
+            [ "${SUMMARIZER_COMPACTOR}" = "mask" ] && printf '  mask_keep_n: %s\n' "${SUMMARIZER_KEEP_N}"
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
