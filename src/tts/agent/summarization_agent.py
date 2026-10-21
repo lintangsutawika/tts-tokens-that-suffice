@@ -72,6 +72,12 @@ class SummarizingAgent(DefaultAgent):
         mask_tagged_keep: bool = True,
         mask_long_output_chars: int = 5000,
         mask_descriptive_placeholder: bool = True,
+        # HARD STOP: if a compaction leaves the context STILL over compress_at_tokens,
+        # raise instead of continuing. Catches compactors (e.g. mask with tagged_keep)
+        # that fire but never actually draw the context back under the window — they
+        # pass the no-reduction guard (some reduction happens) yet the context still
+        # exceeds the trigger and grows unbounded. Enabled per run via config/env.
+        strict_under_budget: bool = False,
         progress_manager=None,
         instance_id: str = "",
         compressions_dir: Path | None = None,
@@ -108,6 +114,7 @@ class SummarizingAgent(DefaultAgent):
         self.compress_at_turns = compress_at_turns
         self.keep_first = keep_first
         self.keep_last_turns = keep_last_turns
+        self.strict_under_budget = strict_under_budget
         self._pm = progress_manager
         self._iid = instance_id
         self.n_compressions = 0
@@ -220,6 +227,17 @@ class SummarizingAgent(DefaultAgent):
                 f"{len(result.messages)} msgs / {tokens_after} tok); skipping"
             )
             return
+        # STRICT guard: if enabled, a compaction that leaves the context STILL over
+        # the trigger is a hard error — it means the compactor failed to actually
+        # reduce enough (e.g. mask with tagged_keep: fires but can't draw context
+        # back under compress_at_tokens). Surface it loudly rather than letting the
+        # run churn with an over-window context.
+        if self.strict_under_budget and tokens_after > self.compress_at_tokens:
+            raise RuntimeError(
+                f"{self._iid}: {result.kind} compaction left context over "
+                f"compress_at_tokens: {tokens_before} tok -> {tokens_after} tok "
+                f"(trigger {self.compress_at_tokens}); strict_under_budget"
+            )
         if result.kind == "summary_failed":
             logger.warning(
                 f"{self._iid}: summarization failed "

@@ -126,6 +126,10 @@ SUMMARIZER_KEEP_LAST_TURNS="${SUMMARIZER_KEEP_LAST_TURNS:-3}"
 # distinct from keep_last_turns (keeping whole recent turns). Only used when
 # SUMMARIZER_COMPACTOR=mask.
 SUMMARIZER_KEEP_N="${SUMMARIZER_KEEP_N:-2}"
+# HARD STOP: when SUMMARIZER_STRICT_UNDER_BUDGET=1, raise if a compaction leaves
+# the context STILL over compress_at_tokens (catches no-op-ish compactors like
+# mask that fire but never draw the context back under the window). Off by default.
+SUMMARIZER_STRICT_UNDER_BUDGET="${SUMMARIZER_STRICT_UNDER_BUDGET:-0}"
 # The summarizer model defaults to the agent's own model (LITELLM_MODEL =
 # <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
 # summarizer_model (make_compactor("subtask") hard-fails without it). Users may
@@ -195,6 +199,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             [ "${SUMMARIZER_COMPACTOR}" = "model" ] && printf '  summarizer_style: %s\n' "${SUMMARIZER_STYLE}"
             [ "${SUMMARIZER_COMPACTOR}" = "subtask" ] && printf '  summarizer_style: subtask\n'
             [ "${SUMMARIZER_COMPACTOR}" = "mask" ] && printf '  mask_keep_n: %s\n' "${SUMMARIZER_KEEP_N}"
+            [ "${SUMMARIZER_STRICT_UNDER_BUDGET}" = "1" ] && printf '  strict_under_budget: true\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
