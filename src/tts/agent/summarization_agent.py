@@ -72,6 +72,10 @@ class SummarizingAgent(DefaultAgent):
         mask_tagged_keep: bool = True,
         mask_long_output_chars: int = 5000,
         mask_descriptive_placeholder: bool = True,
+        # cliff: delegate head+tail retention to upstream CliffCompaction
+        # (pre-first-assistant head + its own keep_recent) instead of the shared
+        # keep_first/keep_last_turns convention. Reduces the 8k verbatim floor.
+        cliff_minimal_head_tail: bool = False,
         # HARD STOP: if a compaction leaves the context STILL over compress_at_tokens,
         # raise instead of continuing. Catches compactors (e.g. mask with tagged_keep)
         # that fire but never actually draw the context back under the window — they
@@ -101,6 +105,7 @@ class SummarizingAgent(DefaultAgent):
                 mask_tagged_keep=mask_tagged_keep,
                 mask_long_output_chars=mask_long_output_chars,
                 mask_descriptive_placeholder=mask_descriptive_placeholder,
+                cliff_minimal_head_tail=cliff_minimal_head_tail,
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.

@@ -130,6 +130,10 @@ SUMMARIZER_KEEP_N="${SUMMARIZER_KEEP_N:-2}"
 # the context STILL over compress_at_tokens (catches no-op-ish compactors like
 # mask that fire but never draw the context back under the window). Off by default.
 SUMMARIZER_STRICT_UNDER_BUDGET="${SUMMARIZER_STRICT_UNDER_BUDGET:-0}"
+# cliff: delegate head+tail retention to upstream CliffCompaction (pre-first-assistant
+# head + its own keep_recent) instead of the shared keep_first/keep_last_turns
+# convention, reducing the 8k verbatim floor. Only used when SUMMARIZER_COMPACTOR=cliff.
+SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL="${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL:-0}"
 # The summarizer model defaults to the agent's own model (LITELLM_MODEL =
 # <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
 # summarizer_model (make_compactor("subtask") hard-fails without it). Users may
@@ -200,6 +204,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             [ "${SUMMARIZER_COMPACTOR}" = "subtask" ] && printf '  summarizer_style: subtask\n'
             [ "${SUMMARIZER_COMPACTOR}" = "mask" ] && printf '  mask_keep_n: %s\n' "${SUMMARIZER_KEEP_N}"
             [ "${SUMMARIZER_STRICT_UNDER_BUDGET}" = "1" ] && printf '  strict_under_budget: true\n'
+            [ "${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL}" = "1" ] && printf '  cliff_minimal_head_tail: true\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"

@@ -20,7 +20,7 @@ decides *how*. ``keep_recent`` (CliffCompaction, in assistant-step turns)
 maps onto the agent's ``keep_last_turns``; see the note below.
 """
 
-from __future__ import annotations
+from dataclasses import replace
 
 from cliffcompaction.cliff import compact
 from cliffcompaction.config import Config as CliffConfig
@@ -61,11 +61,26 @@ class CliffCompactor:
         cmd_max_chars: int = 150,
         human_max_chars: int = 20000,
         keep_thinking: bool = True,
+        # Match upstream CliffCompaction's MINIMAL head/tail: keep only the
+        # pre-first-assistant head (system+user task) verbatim and let cliff's
+        # OWN keep_recent decide the trailing turns, instead of this harness's
+        # keep_first=4 / keep_last_turns=3 split_head_tail reservation. The
+        # harness-wide head/tail convention is bigger than upstream's minimal
+        # head, so on small windows (8k) the verbatim floor alone can exceed the
+        # trigger; minimal_head_tail reduces it to upstream's leaner design.
+        # Default False keeps the shared convention (comparability with the
+        # mask/model/truncation strategies). When True, compact() ignores the
+        # agent's keep_first/keep_last_turns and delegates head+tail entirely to
+        # the upstream package (keep_recent = keep_last_turns).
+        minimal_head_tail: bool = False,
     ):
-        # The agent's `keep_last_turns` already reserved the verbatim tail via
-        # split_head_tail, so every middle turn should be compactable. Force
-        # keep_recent=0 — the upstream default (3) would otherwise refuse to
-        # compact a short middle and silently no-op the strategy.
+        # With the harness head/tail convention (minimal_head_tail=False) the
+        # agent already reserved the tail via split_head_tail, so every middle
+        # turn should be compactable -> force keep_recent=0 (upstream's default
+        # 3 would otherwise refuse to compact a short middle and no-op us).
+        # With minimal_head_tail=True we delegate tail retention to upstream, so
+        # keep_recent carries the agent's keep_last_turns (patched per-compact).
+        self._minimal_head_tail = minimal_head_tail
         self._cfg = CliffConfig(
             result_max_chars=result_max_chars,
             thought_max_chars=thought_max_chars,
@@ -82,20 +97,28 @@ class CliffCompactor:
         keep_first: int = 4,
         keep_last_turns: int = 3,
     ) -> CompactionResult:
-        head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
-        if not middle:
-            # Nothing to compact — mirror truncation's no-op shape.
-            return CompactionResult(
-                messages=list(messages),
-                kind="summary",
-                summary=None,
-                metadata={"n_dropped": 0, "cliff": True},
-            )
-        # Run CliffCompaction over the middle only. Its own head/tail handling
-        # is bypassed (we already split), but give it keep_recent=0 so every
-        # middle turn is eligible, and pass the tail as the verbatim suffix by
-        # reconstructing the input it expects.
-        ctx = compact(middle, DIALECT, self._cfg)
+        if self._minimal_head_tail:
+            # Upstream fan: delegate head AND tail retention entirely to the
+            # cliffcompaction package. upstream computes its own minimal head
+            # (pre-first-assistant = system+user) and keeps its own keep_recent
+            # trailing turns verbatim, so the verbatim floor is minimial.
+            cfg = replace(self._cfg, keep_recent=keep_last_turns)
+            head, middle, tail = [], [], []
+            ctx = compact(messages, DIALECT, cfg)
+        else:
+            # Shared-convention path: reserve keep_first / keep_last_turns via
+            # split_head_tail (matching mask/model/truncation), then compact the
+            # middle with keep_recent=0 (everything in the middle eligible).
+            head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
+            if not middle:
+                # Nothing to compact — mirror truncation's no-op shape.
+                return CompactionResult(
+                    messages=list(messages),
+                    kind="summary",
+                    summary=None,
+                    metadata={"n_dropped": 0, "cliff": True},
+                )
+            ctx = compact(middle, DIALECT, self._cfg)
         if ctx is None:
             # compact() found nothing to gain (e.g. every middle turn fits or
             # the summary would not shrink it). Keep the full list unchanged.
@@ -111,12 +134,28 @@ class CliffCompactor:
                 f"{ctx.summary.get('role')!r} from cliff.compact"
             )
         summary_text = ctx.summary.get("content") or ""
+        if self._minimal_head_tail:
+            return CompactionResult(
+                messages=ctx.messages,  # upstream already built [head, summary, kept]
+                kind="summary",
+                summary=summary_text,
+                metadata={
+                    "cliff": True,
+                    "minimal_head_tail": True,
+                    "summary_len": len(summary_text),
+                    "result_max_chars": self._cfg.result_max_chars,
+                    "thought_max_chars": self._cfg.thought_max_chars,
+                    "thinking_max_chars": self._cfg.thinking_max_chars,
+                    "keep_thinking": self._cfg.keep_thinking,
+                },
+            )
         return CompactionResult(
             messages=[*head, ctx.summary, *tail],
             kind="summary",
             summary=summary_text,
             metadata={
                 "cliff": True,
+                "minimal_head_tail": False,
                 "head_len": len(head),
                 "middle_len": len(middle),
                 "summary_len": len(summary_text),
