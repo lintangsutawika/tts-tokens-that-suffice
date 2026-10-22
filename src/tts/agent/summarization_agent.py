@@ -218,34 +218,49 @@ class SummarizingAgent(DefaultAgent):
         n_before = len(self.messages)
         tokens_before = self._tokens_of(self.messages)
 
-        result = self.compactor.compact(
-            self.messages,
-            keep_first=self.keep_first,
-            keep_last_turns=self.keep_last_turns,
-        )
-        # No-reduction guard: if the compactor returned the same size (or larger)
-        # -- e.g. the subtask model marked everything in_progress -- do NOT count
-        # it as a compression or churn repeatedly. This prevents a no-op compactor
-        # from firing every turn while the context grows unbounded (seen as 64x
-        # no-op compactions -> ContextWindowExceededError).
-        tokens_after = self._tokens_of(result.messages)
-        if len(result.messages) >= n_before and tokens_after >= tokens_before:
+        # Escalation ladder, mirroring CliffCompaction's proxy: compact, and if the
+        # result is STILL over compress_at_tokens, re-compact more aggressively
+        # (smaller keep_last_turns tail) one rung at a time. Only after the ladder
+        # is exhausted do we apply strict_under_budget (raise) — or, by default,
+        # fall through to a soft over-budget send. This matches the original, which
+        # walks base -> keep_recent=1 -> +caps -> truncation before deciding strict
+        # vs soft; a single pass would strict-error on an overflow the ladder could
+        # have recovered.
+        rung = 0
+        result = None
+        tokens_after = 0
+        for rung, klt in enumerate([self.keep_last_turns, 2, 1, 0]):
+            result = self.compactor.compact(
+                self.messages,
+                keep_first=self.keep_first,
+                keep_last_turns=klt,
+            )
+            tokens_after = self._tokens_of(result.messages)
+            if tokens_after <= self.compress_at_tokens:
+                break
+        # No-reduction guard (only meaningful if the FIRST rung didn't reduce): if
+        # the compactor returned the same size (or larger) it's a no-op compactor
+        # (e.g. subtask marked everything in_progress) — do NOT count it or churn.
+        if (
+            len(result.messages) >= n_before
+            and tokens_after >= tokens_before
+            and rung == 0
+        ):
             logger.info(
                 f"{self._iid}: compaction no-op (no reduction: "
                 f"{n_before} msgs / {tokens_before} tok -> "
                 f"{len(result.messages)} msgs / {tokens_after} tok); skipping"
             )
             return
-        # STRICT guard: if enabled, a compaction that leaves the context STILL over
-        # the trigger is a hard error — it means the compactor failed to actually
-        # reduce enough (e.g. mask with tagged_keep: fires but can't draw context
-        # back under compress_at_tokens). Surface it loudly rather than letting the
-        # run churn with an over-window context.
+        # STRICT guard AFTER the ladder: if enabled and even the most aggressive
+        # rung leaves the context over the trigger, this is a hard error — the
+        # compactor genuinely cannot fit the window (e.g. mask with tagged_keep).
+        # Distinguished from the soft case the ladder recovers.
         if self.strict_under_budget and tokens_after > self.compress_at_tokens:
             raise RuntimeError(
-                f"{self._iid}: {result.kind} compaction left context over "
-                f"compress_at_tokens: {tokens_before} tok -> {tokens_after} tok "
-                f"(trigger {self.compress_at_tokens}); strict_under_budget"
+                f"{self._iid}: {result.kind} compaction still over compress_at_tokens "
+                f"after escalation ladder: {tokens_before} tok -> {tokens_after} tok "
+                f"(trigger {self.compress_at_tokens}, rung {rung}); strict_under_budget"
             )
         if result.kind == "summary_failed":
             logger.warning(
