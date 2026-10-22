@@ -76,6 +76,9 @@ class SummarizingAgent(DefaultAgent):
         # (pre-first-assistant head + its own keep_recent) instead of the shared
         # keep_first/keep_last_turns convention. Reduces the 8k verbatim floor.
         cliff_minimal_head_tail: bool = False,
+        # model/sectioned: keep ONLY user+system verbatim (head_user_system),
+        # mirroring cliff-match's minimal head.
+        head_user_system: bool = False,
         # HARD STOP: if a compaction leaves the context STILL over compress_at_tokens,
         # raise instead of continuing. Catches compactors (e.g. mask with tagged_keep)
         # that fire but never actually draw the context back under the window — they
@@ -106,6 +109,7 @@ class SummarizingAgent(DefaultAgent):
                 mask_long_output_chars=mask_long_output_chars,
                 mask_descriptive_placeholder=mask_descriptive_placeholder,
                 cliff_minimal_head_tail=cliff_minimal_head_tail,
+                head_user_system=head_user_system,
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.

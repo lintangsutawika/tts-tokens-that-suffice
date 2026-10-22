@@ -237,9 +237,16 @@ class ModelBasedSummarizer:
     records which happened.
     """
 
-    def __init__(self, summarizer: Summarizer, max_size: int = 20):
+    def __init__(self, summarizer: Summarizer, max_size: int = 20,
+                 head_user_system: bool = False):
         self.summarizer = summarizer
         self.max_size = max_size
+        # head_user_system: keep ONLY the leading user+system messages verbatim
+        # (system task + first user prompt) instead of the shared keep_first=4
+        # convention — mirrors the cliff-match minimal head. The summarizer still
+        # sees the FULL history (z covers everything); this only shrinks the
+        # verbatim head retained in the output, reducing the small-window floor.
+        self._head_user_system = head_user_system
 
     def compact(
         self,
@@ -247,6 +254,15 @@ class ModelBasedSummarizer:
         keep_first: int = 4,
         keep_last_turns: int = 3,
     ) -> CompactionResult:
+        if self._head_user_system:
+            # head = leading non-assistant messages (system + user task), i.e.
+            # everything before the first assistant turn.
+            n = 0
+            for m in messages:
+                if m.get("role") == "assistant":
+                    break
+                n += 1
+            keep_first = max(n, 1)
         head, _middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
         try:
             z = self.summarizer.summarize(messages_to_steps(messages))
