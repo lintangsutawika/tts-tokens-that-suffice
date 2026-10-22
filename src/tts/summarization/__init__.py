@@ -39,6 +39,8 @@ def make_compactor(
     mask_thinking: bool = False,
     mask_keep_n: int = 0,
     mask_tagged_keep: bool = True,
+    mask_long_output_chars: int = 5000,
+    mask_descriptive_placeholder: bool = True,
     # cliff: when True, delegate head+tail retention entirely to upstream
     # CliffCompaction (pre-first-assistant head + its own keep_recent) instead
     # of the harness keep_first/keep_last_turns split_head_tail convention.
