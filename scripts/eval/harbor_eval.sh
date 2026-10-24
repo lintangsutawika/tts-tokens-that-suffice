@@ -166,6 +166,17 @@ if _is_true "${USE_SUMMARIZER}"; then
     # mask/truncation have no style.
     if [ "${_cmp}" = "model" ]; then _cmp="model-${SUMMARIZER_STYLE}"
     elif [ "${_cmp}" = "subtask" ]; then _cmp="subtask"; fi
+    # Match-variant flag: when a run overrides the default head/tail (cliff-match
+    # -> minimal_head_tail, section-match -> head_user_system) it is a DIFFERENT
+    # method identity, so tag _SUM_TAG AND the JOB_NAME to get its OWN yaml + run
+    # dir. Without this, a cliff-match run on a model that already has standard
+    # cliff would reuse the STALE shared sum-cliff-<win>.yaml (which lacks the
+    # match flags) — the exact collision that silently ran Qwen cliff-match as
+    # standard cliff.
+    if [ "${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL:-0}" = "1" ] ||
+       [ "${SUMMARIZER_HEAD_USER_SYSTEM:-0}" = "1" ]; then
+        _cmp="${_cmp}-match"
+    fi
     _SUM_TAG="-sum-${_cmp}-${_trig}"
 fi
 
