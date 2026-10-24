@@ -50,6 +50,10 @@ def make_compactor(
     # (instead of the shared keep_first=4). Mirrors cliff-match's minimal head;
     # the summarizer still covers the full history (z = ONE summary).
     head_user_system: bool = False,
+    # model/sectioned FLUSH mode: discard the prior summary on each recompaction
+    # and re-summarize from RAW turns (retained across compactions), avoiding
+    # summary-of-summary drift. Default False = recursive single-summary.
+    model_flush: bool = False,
 ):
     """Build a compactor from a config string.
 
@@ -92,6 +96,7 @@ def make_compactor(
                 system_prompt=get_summary_prompt(summarizer_style),
             ),
             head_user_system=head_user_system,
+            flush=model_flush,
         )
     if name in ("subtask", "theme_model"):
         from .subtask_based import SubtaskLitellmSummarizer

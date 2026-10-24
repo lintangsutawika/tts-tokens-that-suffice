@@ -79,6 +79,9 @@ class SummarizingAgent(DefaultAgent):
         # model/sectioned: keep ONLY user+system verbatim (head_user_system),
         # mirroring cliff-match's minimal head.
         head_user_system: bool = False,
+        # model/sectioned FLUSH mode: discard prior summary, re-summarize from
+        # raw (no summary-of-summary drift). Default False (recursive).
+        model_flush: bool = False,
         # HARD STOP: if a compaction leaves the context STILL over compress_at_tokens,
         # raise instead of continuing. Catches compactors (e.g. mask with tagged_keep)
         # that fire but never actually draw the context back under the window — they
@@ -110,6 +113,7 @@ class SummarizingAgent(DefaultAgent):
                 mask_descriptive_placeholder=mask_descriptive_placeholder,
                 cliff_minimal_head_tail=cliff_minimal_head_tail,
                 head_user_system=head_user_system,
+                model_flush=model_flush,
             )
         self.compactor = compactor
         # Directory to write one file per compaction event as it is triggered.

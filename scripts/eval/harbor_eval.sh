@@ -138,6 +138,10 @@ SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL="${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL:-0}"
 # the shared keep_first=4 (mirrors cliff-match's minimal head). Only used when
 # SUMMARIZER_COMPACTOR=model.
 SUMMARIZER_HEAD_USER_SYSTEM="${SUMMARIZER_HEAD_USER_SYSTEM:-0}"
+# model/sectioned FLUSH mode: discard the prior summary on each recompaction and
+# re-summarize from RAW turns (no summary-of-summary drift). Opt-in evaluate-only
+# alternate (default off = recursive single-summary). Only used when COMPACTOR=model.
+SUMMARIZER_MODEL_FLUSH="${SUMMARIZER_MODEL_FLUSH:-0}"
 # The summarizer model defaults to the agent's own model (LITELLM_MODEL =
 # <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
 # summarizer_model (make_compactor("subtask") hard-fails without it). Users may
@@ -176,6 +180,11 @@ if _is_true "${USE_SUMMARIZER}"; then
     if [ "${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL:-0}" = "1" ] ||
        [ "${SUMMARIZER_HEAD_USER_SYSTEM:-0}" = "1" ]; then
         _cmp="${_cmp}-match"
+    fi
+    # FLUSH-mode tag: distinct yaml + JOB_NAME (-> sum-model-sectioned-flush), so it
+    # never collides with standard sectioned or section-match.
+    if [ "${SUMMARIZER_MODEL_FLUSH:-0}" = "1" ]; then
+        _cmp="${_cmp}-flush"
     fi
     _SUM_TAG="-sum-${_cmp}-${_trig}"
 fi
@@ -221,6 +230,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             [ "${SUMMARIZER_STRICT_UNDER_BUDGET}" = "1" ] && printf '  strict_under_budget: true\n'
             [ "${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL}" = "1" ] && printf '  cliff_minimal_head_tail: true\n'
             [ "${SUMMARIZER_HEAD_USER_SYSTEM}" = "1" ] && printf '  head_user_system: true\n'
+            [ "${SUMMARIZER_MODEL_FLUSH}" = "1" ] && printf '  model_flush: true\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"

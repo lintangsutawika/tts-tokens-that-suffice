@@ -62,6 +62,16 @@ def strip_thinking(text: str) -> str:
 RECALL_TOOL_NAME = "recall_context"
 
 
+def _is_summary_msg(m: dict) -> bool:
+    """True if m is a sectioned summary rendered as a tool turn (recall_context)."""
+    tc = m.get("tool_calls") or []
+    for call in tc if isinstance(tc, list) else []:
+        fn = call.get("function") or {}
+        if fn.get("name") == RECALL_TOOL_NAME:
+            return True
+    return m.get("tool_call_id", "").startswith("summary_")
+
+
 def summary_as_tool_turn(
     summary: str, tool_name: str = RECALL_TOOL_NAME, call_id: str = "summary_0"
 ) -> list[dict]:
@@ -238,7 +248,7 @@ class ModelBasedSummarizer:
     """
 
     def __init__(self, summarizer: Summarizer, max_size: int = 20,
-                 head_user_system: bool = False):
+                 head_user_system: bool = False, flush: bool = False):
         self.summarizer = summarizer
         self.max_size = max_size
         # head_user_system: keep ONLY the leading user+system messages verbatim
@@ -247,6 +257,15 @@ class ModelBasedSummarizer:
         # sees the FULL history (z covers everything); this only shrinks the
         # verbatim head retained in the output, reducing the small-window floor.
         self._head_user_system = head_user_system
+        # flush: ALTERNATE mode (opt-in, default False = existing recursive
+        # single-summary). In flush mode the prior summary is DISCARDED on each
+        # recompaction and the RAW middle turns are retained across compactions
+        # (self._flush_raw), so each summarizer input = [raw so far, new raw] —
+        # fresh re-summarization from raw, no summary-of-summary drift (mirrors
+        # cliff's discard behavior but with LLM quality). Output stays a single
+        # bounded summary message.
+        self._flush = flush
+        self._flush_raw: list[dict] = []
 
     def compact(
         self,
@@ -263,7 +282,30 @@ class ModelBasedSummarizer:
                     break
                 n += 1
             keep_first = max(n, 1)
-        head, _middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
+        head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
+        if self._flush:
+            # DISCARD the prior summary message(s) from the middle (flush them)
+            # and retain only raw turns, so recompaction re-summarizes from raw
+            # content — no summary-of-summary drift. Accumulate across compactions
+            # via self._flush_raw, consuming it into each new summary.
+            raw = [m for m in middle if not _is_summary_msg(m)]
+            self._flush_raw.extend(raw)
+            try:
+                z = self.summarizer.summarize(messages_to_steps(self._flush_raw))
+            except Exception as exc:
+                return CompactionResult(
+                    messages=head + tail,
+                    kind="summary_failed",
+                    summary=None,
+                    metadata={"error": str(exc)},
+                )
+            self._flush_raw = []  # consumed into z; next compaction starts fresh raw
+            return CompactionResult(
+                messages=head + summary_as_tool_turn(z) + tail,
+                kind="summary",
+                summary=z,
+                metadata={"flush": True, "n_raw": len(raw)},
+            )
         try:
             z = self.summarizer.summarize(messages_to_steps(messages))
         except Exception as exc:
