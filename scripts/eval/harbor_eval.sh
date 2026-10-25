@@ -142,6 +142,10 @@ SUMMARIZER_HEAD_USER_SYSTEM="${SUMMARIZER_HEAD_USER_SYSTEM:-0}"
 # re-summarize from RAW turns (no summary-of-summary drift). Opt-in evaluate-only
 # alternate (default off = recursive single-summary). Only used when COMPACTOR=model.
 SUMMARIZER_MODEL_FLUSH="${SUMMARIZER_MODEL_FLUSH:-0}"
+# mask FLUSH mode: drop OLDER masked tool messages so the placeholder messages
+# don't accumulate past the context budget (stock mask keeps every message ->
+# unbounded ~95% overflow). Only used when SUMMARIZER_COMPACTOR=mask.
+SUMMARIZER_MASK_FLUSH="${SUMMARIZER_MASK_FLUSH:-0}"
 # The summarizer model defaults to the agent's own model (LITELLM_MODEL =
 # <provider>/<MODEL>), so the subtask/model compactors ALWAYS get a valid
 # summarizer_model (make_compactor("subtask") hard-fails without it). Users may
@@ -181,9 +185,9 @@ if _is_true "${USE_SUMMARIZER}"; then
        [ "${SUMMARIZER_HEAD_USER_SYSTEM:-0}" = "1" ]; then
         _cmp="${_cmp}-match"
     fi
-    # FLUSH-mode tag: distinct yaml + JOB_NAME (-> sum-model-sectioned-flush), so it
-    # never collides with standard sectioned or section-match.
-    if [ "${SUMMARIZER_MODEL_FLUSH:-0}" = "1" ]; then
+    # FLUSH-mode tag: distinct yaml + JOB_NAME (-> *-flush), so it never collides
+    # with the standard/...-match run. Applies to model_flush AND mask_flush.
+    if [ "${SUMMARIZER_MODEL_FLUSH:-0}" = "1" ] || [ "${SUMMARIZER_MASK_FLUSH:-0}" = "1" ]; then
         _cmp="${_cmp}-flush"
     fi
     _SUM_TAG="-sum-${_cmp}-${_trig}"
@@ -231,6 +235,7 @@ if [ -n "${STEP_LIMIT}" ] || _is_true "${USE_SUMMARIZER}"; then
             [ "${SUMMARIZER_CLIFF_MINIMAL_HEAD_TAIL}" = "1" ] && printf '  cliff_minimal_head_tail: true\n'
             [ "${SUMMARIZER_HEAD_USER_SYSTEM}" = "1" ] && printf '  head_user_system: true\n'
             [ "${SUMMARIZER_MODEL_FLUSH}" = "1" ] && printf '  model_flush: true\n'
+            [ "${SUMMARIZER_MASK_FLUSH}" = "1" ] && printf '  mask_flush: true\n'
             printf '  compress_at_tokens: %s\n' "${SUMMARIZER_TRIGGER_TOKENS}"
             printf '  keep_first: %s\n' "${SUMMARIZER_KEEP_FIRST}"
             printf '  keep_last_turns: %s\n' "${SUMMARIZER_KEEP_LAST_TURNS}"
