@@ -202,13 +202,18 @@ class MaskBasedSummarizer:
         keep_last_turns: int = 3,
     ) -> CompactionResult:
         head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
+        # For the pure flush variant (head + mask + tail) NOTHING in the middle is
+        # kept verbatim: force keep_n=0 so every middle tool output is masked, then
+        # the older masked ones are dropped. This collapses the context toward
+        # cliff-sized (~9-15 msgs) instead of near the 8k ceiling with ~34 msgs.
+        _keep_n = 0 if self._flush else self.keep_n
         masked = mask_env_messages(
             middle,
             placeholder=self.placeholder,
             mask_output=self.mask_output,
             mask_thinking=self.mask_thinking,
             thinking_placeholder=self.thinking_placeholder,
-            keep_n=self.keep_n,
+            keep_n=_keep_n,
             tagged_keep=self.tagged_keep,
             long_output_chars=self.long_output_chars,
             descriptive_placeholder=self.descriptive_placeholder,
