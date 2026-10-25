@@ -182,6 +182,7 @@ class MaskBasedSummarizer:
         long_output_chars: int = 5000,
         descriptive_placeholder: bool = True,
         flush: bool = False,
+        flush_max_msgs: int = 7,
     ):
         if not mask_output and not mask_thinking:
             raise ValueError("mask_output and mask_thinking are both False: nothing to mask")
@@ -194,6 +195,7 @@ class MaskBasedSummarizer:
         self.long_output_chars = long_output_chars
         self.descriptive_placeholder = descriptive_placeholder
         self._flush = flush
+        self._flush_max_msgs = flush_max_msgs
 
     def compact(
         self,
@@ -225,20 +227,16 @@ class MaskBasedSummarizer:
         )
         n_dropped = 0
         if self._flush:
-            # DROP the OLDER masked tool messages (already replaced with a
-            # placeholder -> "Old environment output:" / [OUTPUT]) so they don't
-            # accumulate past the budget. Keep the recent verbatim ones (keep_n)
-            # and any still-tagged (unmasked) outputs. This bounds the message
-            # count like cliff discards its prior summary.
-            _masked_prefix = ("Old environment output:", ) if self.descriptive_placeholder else (self.placeholder,)
+            # Pure flush = "cliff with masked obs instead of truncated": the
+            # message COUNT is the floor (30+ assistant msgs -> ~41 after, near the
+            # 8k ceiling), not the obs tokens. Keep only the most recent
+            # flush_max_msgs middle messages (contiguous, preserving the
+            # assistant<->tool alternation the chat API validates) and DROP all
+            # older ones — assistant framing AND masked-obs markers. This collapses
+            # the context to roughly cliff-sized (head + small recent middle + tail)
+            # so small windows (8k) hold without strict_under firing.
             before = len(masked)
-            masked = [
-                m for m in masked
-                if not (
-                    m.get("role") == "tool"
-                    and any(str(m.get("content", "")).startswith(p) for p in _masked_prefix)
-                )
-            ]
+            masked = masked[-self._flush_max_msgs:] if self._flush_max_msgs > 0 else []
             n_dropped = before - len(masked)
         return CompactionResult(
             messages=head + masked + tail,
