@@ -2,7 +2,7 @@
 # Downstream agent eval on three SWE benchmarks via Harbor + Modal + mini-swe-agent.
 #
 #   1. SWE-bench Verified   -> swe-bench/swe-bench-verified          (500, test-graded)
-#   2. SWE-bench Pro        -> scale-ai/swe-bench-pro                (731, test-graded)
+#   2. SWE-bench Pro        -> cais/swebenchpro                (731, test-graded)
 #   3. Senior SWE-bench     -> snorkel-ai/senior-swe-bench-v2026.06  ( 50, LLM-judge)
 #   4. Terminal-Bench 2.1   -> terminal-bench/terminal-bench-2-1     ( 89, graded)
 #
@@ -58,7 +58,7 @@ fi
 
 case "${BENCH}" in
     verified) DATASET="swe-bench/swe-bench-verified" ;;
-    pro)      DATASET="scale-ai/swe-bench-pro" ;;
+    pro)      DATASET="cais/swebenchpro" ;;
     senior)   DATASET="snorkel-ai/senior-swe-bench-v2026.06" ;;
     terminal) DATASET="terminal-bench/terminal-bench-2-1" ;;
     *) echo "unknown benchmark '${BENCH}' (want verified|pro|senior|terminal)" >&2; exit 2 ;;
