@@ -41,6 +41,11 @@ def make_compactor(
     mask_tagged_keep: bool = True,
     mask_long_output_chars: int = 5000,
     mask_descriptive_placeholder: bool = True,
+    # mask FLUSH mode: drop the OLDER masked tool messages (the placeholder ones)
+    # so they don't accumulate past the context budget. Stock mask keeps every
+    # message -> context grows unbounded (~95% overflow). flush=True removes prior
+    # masked turns (like cliff discards its prior summary), bounding the context.
+    mask_flush: bool = False,
     # cliff: when True, delegate head+tail retention entirely to upstream
     # CliffCompaction (pre-first-assistant head + its own keep_recent) instead
     # of the harness keep_first/keep_last_turns split_head_tail convention.
@@ -76,6 +81,7 @@ def make_compactor(
             tagged_keep=mask_tagged_keep,
             long_output_chars=mask_long_output_chars,
             descriptive_placeholder=mask_descriptive_placeholder,
+            flush=mask_flush,
         )
     if name in ("truncation", "truncate"):
         return TruncationBasedSummarizer()

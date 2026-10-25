@@ -72,6 +72,10 @@ class SummarizingAgent(DefaultAgent):
         mask_tagged_keep: bool = True,
         mask_long_output_chars: int = 5000,
         mask_descriptive_placeholder: bool = True,
+        # mask FLUSH mode: drop older masked tool messages so the placeholder
+        # messages don't accumulate past the context budget (stock mask grows
+        # unbounded ~95% overflow). Default False.
+        mask_flush: bool = False,
         # cliff: delegate head+tail retention to upstream CliffCompaction
         # (pre-first-assistant head + its own keep_recent) instead of the shared
         # keep_first/keep_last_turns convention. Reduces the 8k verbatim floor.
@@ -111,6 +115,7 @@ class SummarizingAgent(DefaultAgent):
                 mask_tagged_keep=mask_tagged_keep,
                 mask_long_output_chars=mask_long_output_chars,
                 mask_descriptive_placeholder=mask_descriptive_placeholder,
+                mask_flush=mask_flush,
                 cliff_minimal_head_tail=cliff_minimal_head_tail,
                 head_user_system=head_user_system,
                 model_flush=model_flush,

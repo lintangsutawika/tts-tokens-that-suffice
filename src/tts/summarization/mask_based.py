@@ -164,7 +164,11 @@ class MaskBasedSummarizer:
 
     The two flags separate "what the agent saw" from "what the agent thought",
     so their costs can be measured independently rather than as one blob.
-    Satisfies base.Compactor.
+    Satisfies base.Compactor. ``flush`` (default False) additionally DROPS the
+    OLDER masked tool messages so the placeholder messages don't accumulate past
+    the context budget (stock mask keeps every message -> context grows unbounded;
+    measured ~95% overflow). This is the "remove prior compaction" step, like
+    cliff discards its prior summary.
     """
 
     def __init__(
@@ -177,6 +181,7 @@ class MaskBasedSummarizer:
         tagged_keep: bool = True,
         long_output_chars: int = 5000,
         descriptive_placeholder: bool = True,
+        flush: bool = False,
     ):
         if not mask_output and not mask_thinking:
             raise ValueError("mask_output and mask_thinking are both False: nothing to mask")
@@ -188,6 +193,7 @@ class MaskBasedSummarizer:
         self.tagged_keep = tagged_keep
         self.long_output_chars = long_output_chars
         self.descriptive_placeholder = descriptive_placeholder
+        self._flush = flush
 
     def compact(
         self,
@@ -212,6 +218,23 @@ class MaskBasedSummarizer:
             for m in masked
             if self.mask_output and m.get("role") == "tool" and m.get("content", "").startswith("Old environment output:")
         )
+        n_dropped = 0
+        if self._flush:
+            # DROP the OLDER masked tool messages (already replaced with a
+            # placeholder -> "Old environment output:" / [OUTPUT]) so they don't
+            # accumulate past the budget. Keep the recent verbatim ones (keep_n)
+            # and any still-tagged (unmasked) outputs. This bounds the message
+            # count like cliff discards its prior summary.
+            _masked_prefix = ("Old environment output:", ) if self.descriptive_placeholder else (self.placeholder,)
+            before = len(masked)
+            masked = [
+                m for m in masked
+                if not (
+                    m.get("role") == "tool"
+                    and any(str(m.get("content", "")).startswith(p) for p in _masked_prefix)
+                )
+            ]
+            n_dropped = before - len(masked)
         return CompactionResult(
             messages=head + masked + tail,
             kind="mask",
@@ -223,6 +246,8 @@ class MaskBasedSummarizer:
                 "tagged_keep": self.tagged_keep,
                 "long_output_chars": self.long_output_chars,
                 "descriptive_placeholder": self.descriptive_placeholder,
+                "flush": self._flush,
+                "n_dropped": n_dropped,
                 "n_output_masked": n_output_masked,
                 "n_thinking_masked": sum(
                     1
