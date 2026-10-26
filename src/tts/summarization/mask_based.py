@@ -183,6 +183,7 @@ class MaskBasedSummarizer:
         descriptive_placeholder: bool = True,
         flush: bool = False,
         flush_max_msgs: int = 7,
+        head_user_system: bool = False,
     ):
         if not mask_output and not mask_thinking:
             raise ValueError("mask_output and mask_thinking are both False: nothing to mask")
@@ -196,6 +197,7 @@ class MaskBasedSummarizer:
         self.descriptive_placeholder = descriptive_placeholder
         self._flush = flush
         self._flush_max_msgs = flush_max_msgs
+        self._head_user_system = head_user_system
 
     def compact(
         self,
@@ -203,6 +205,17 @@ class MaskBasedSummarizer:
         keep_first: int = 4,
         keep_last_turns: int = 3,
     ) -> CompactionResult:
+        if self._head_user_system:
+            # Minimal head (same as cliff_minimal_head_tail / sectioned head_user_system):
+            # keep only the leading non-assistant messages (system + user task) verbatim,
+            # i.e. everything before the first assistant turn, instead of the harness
+            # keep_first=4. Matches the original CliffCompaction head.
+            n = 0
+            for m in messages:
+                if m.get("role") == "assistant":
+                    break
+                n += 1
+            keep_first = max(n, 1)
         head, middle, tail = split_head_tail(messages, keep_first, keep_last_turns)
         # For the pure flush variant (head + mask + tail) NOTHING in the middle is
         # kept verbatim: force keep_n=0 so every middle tool output is masked, then

@@ -82,6 +82,7 @@ def make_compactor(
             long_output_chars=mask_long_output_chars,
             descriptive_placeholder=mask_descriptive_placeholder,
             flush=mask_flush,
+            head_user_system=head_user_system,
         )
     if name in ("truncation", "truncate"):
         return TruncationBasedSummarizer()
