@@ -205,11 +205,12 @@ class MaskBasedSummarizer:
         keep_first: int = 4,
         keep_last_turns: int = 3,
     ) -> CompactionResult:
-        if self._head_user_system:
-            # Minimal head (same as cliff_minimal_head_tail / sectioned head_user_system):
-            # keep only the leading non-assistant messages (system + user task) verbatim,
-            # i.e. everything before the first assistant turn, instead of the harness
-            # keep_first=4. Matches the original CliffCompaction head.
+        if self._head_user_system or self._flush:
+            # Minimal head (flus=cliff-with-masked-obs -> match the original
+            # CliffCompaction head like cliff_minimal_head_tail / head_user_system):
+            # keep only the leading non-assistant messages (system + user task),
+            # i.e. everything before the first assistant turn, instead of the
+            # harness keep_first=4.
             n = 0
             for m in messages:
                 if m.get("role") == "assistant":
