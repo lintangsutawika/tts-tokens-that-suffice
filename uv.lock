@@ -4948,6 +4948,22 @@ wheels = [
 ]
 
 [[package]]
+name = "sail"
+version = "0.17.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cloudpickle" },
+    { name = "protobuf" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b5/9e/55643c398d8b9be28a7350193a5a2ed2f2ee9587a925fada51ea72c74ba6/sail-0.17.1-cp39-abi3-macosx_10_12_x86_64.whl", hash = "sha256:e6f69df966e9ce4e870f8bc48e9480d4a2eff78c9e2b064af94f25ecad614d5a", size = 16512267, upload-time = "2026-10-27T02:05:21.231Z" },
+    { url = "https://files.pythonhosted.org/packages/1f/f0/47559a37e6743a63174a2c9de3275700525dba6b66b6e8798874bbb2295f/sail-0.17.1-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:57f70008c4edd8bed07561aca900568f650a9e570a22c41fc4e8849523c9931d", size = 15725902, upload-time = "2026-10-27T02:05:24.249Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/ae/475309e8d49a7a1eda7f442ca72e5666f8adbfcc1f7e0f90a4b02e845fbc/sail-0.17.1-cp39-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl", hash = "sha256:326092be38283d3bedfadcb81640c7b558c6ed5784129cc27095832e385954bd", size = 17695518, upload-time = "2026-10-27T02:05:26.418Z" },
+    { url = "https://files.pythonhosted.org/packages/2f/ef/c1fa3cffafcda8916db8cc5361c8107a410f87bff474430edd57bd4404ef/sail-0.17.1-cp39-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:e19f4e07b3544087f290175519b10f3f389244b5229bab7cb3886bc99265ca9d", size = 17443155, upload-time = "2026-10-27T02:05:29.125Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/ca/bb842428f90a915aa1508ad2d1ad742cc57f9181dd3979614b593217f6f1/sail-0.17.1-cp39-abi3-win_amd64.whl", hash = "sha256:c53e93dcb12a9897e40fb5b6c90c634d13bd26db9aec520bdefa2004046db914", size = 14133062, upload-time = "2026-10-27T02:05:31.496Z" },
+]
+
+[[package]]
 name = "scantree"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
@@ -5745,6 +5761,7 @@ dependencies = [
     { name = "litellm", version = "1.98.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "matplotlib" },
     { name = "mini-swe-agent", extra = ["full"] },
+    { name = "sail" },
     { name = "swebench" },
     { name = "swesmith" },
     { name = "tinker-cookbook" },
@@ -5769,6 +5786,7 @@ requires-dist = [
     { name = "mini-swe-agent", extras = ["full"], specifier = ">=2.4.5" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "sail", specifier = ">=0.17.1" },
     { name = "swebench", specifier = ">=4.1.0" },
     { name = "swesmith", specifier = ">=0.0.8" },
     { name = "tinker-cookbook", specifier = ">=0.4.2" },

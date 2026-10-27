@@ -40,6 +40,7 @@ dependencies = [
     # tts.summarization.cliff_based.CliffCompactor; only compact()/dialect used,
     # the proxy daemon is ignored.
     "cliffcompaction>=0.1.0",
+    "sail>=0.17.1",
 ]
 
 [project.optional-dependencies]

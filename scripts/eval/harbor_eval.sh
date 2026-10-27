@@ -300,6 +300,12 @@ SINGULARITY_SANDBOX_DIR="${SINGULARITY_SANDBOX_DIR:-}"
 # The writable-rootfs environment class, selected via --environment-import-path (harbor's
 # -e is a fixed enum and can't name a custom class). Override only to test a fork.
 SINGULARITY_ENV_IMPORT_PATH="${SINGULARITY_ENV_IMPORT_PATH:-harbor_singularity_hpc.environment:SingularityWritableEnvironment}"
+# SAIL (sail.harbor:SailboxEnvironment) cloud sandboxes: every trial runs in its own
+# Sailbox (cloud Linux VM with internet -> fixes the singularity uvicorn + apt-build-255
+# + node-flakiness issues). The SDK needs SAIL_API_KEY; we keep SAIL_KEY in .env.
+: "${SAIL_API_KEY:=${SAIL_KEY:-}}"
+export SAIL_API_KEY
+SAIL_ENV_IMPORT_PATH="${SAIL_ENV_IMPORT_PATH:-sail.harbor:SailboxEnvironment}"
 # Task-container memory. Harbor runs a soft watchdog on each task container (PSS of its
 # process tree) and kills at 95% of the task's [environment].memory (8G for these SWE-bench
 # datasets) -> MemoryLimitExceededError. Singularity uses no cgroup, so it's a monitor, not
@@ -437,6 +443,7 @@ ARGS=(
 # backend uses the built-in -e enum.
 case "${ENVIRONMENT}" in
     singularity*) ARGS+=( --environment-import-path "${SINGULARITY_ENV_IMPORT_PATH}" ) ;;
+    sail*)        ARGS+=( --environment-import-path "${SAIL_ENV_IMPORT_PATH}" ) ;;
     *)            ARGS+=( -e "${ENVIRONMENT}" ) ;;
 esac
 
