@@ -328,6 +328,7 @@ EPHEMERAL_RELAY="${EPHEMERAL_RELAY:-0}"
 # to use a relay on purpose.
 case "${ENV:-modal}" in
     modal*) ;;
+    sail*) ;;
     *)
         if [ -n "${RELAY_URL}" ] || [ "${EPHEMERAL_RELAY}" = "1" ]; then
             echo "[relay] ENV=${ENV:-modal} runs on-node -> ignoring relay" \
